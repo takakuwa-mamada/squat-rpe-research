@@ -1,0 +1,60 @@
+=============================================================
+ スクワット計測 チートシート
+=============================================================
+
+■ ジムで
+-------------------------------------------------------------
+ 1. テザリングON → PC接続 → ipconfig でIP確認
+ 2. M5電源ON   → WiFi:OK / DSTがPCのIPと一致 / SEND
+ 3. python scripts\multi_imu_receiver.py
+ 4. バー水平で az ≒ 1.0 を確認   ★ここ外すと全部無駄
+ 5. 動画の録画を開始（セッション通して回しっぱなし）
+ 6. 各セット:
+      SPACE → 挙上 → SPACE → RPEを声に出す → 数字キー
+ 7. q で終了 → mean Hz が 90〜100 か確認
+
+ キー:  SPACE=セット区切り   6〜9=RPE   0=RPE10   5=RPE5
+        u=直前を取消        q=終了
+
+
+■ 帰宅後
+-------------------------------------------------------------
+ cd "C:\Users\129ka\OneDrive\ドキュメント\Claude\Projects\大学院研究"
+
+ python scripts\split_session.py --subject S001 --session SES004
+   → data\S001\SES004\videos\ に set01.mp4 … を置く
+   → meta.json の weight_kg / reps を埋める
+
+ python scripts\pose_extract_yolo.py --subject S001
+ python scripts\extract_features.py  --subject S001
+ python scripts\aggregate_features.py
+
+ 30試技たまったら:
+ python scripts\train_rpe_model.py
+
+
+■ 確認ポイント
+-------------------------------------------------------------
+ mean Hz          90〜100
+ peak_v           0.3〜1.5 m/s
+ key_visibility   0.7 以上
+ RPE ↑ のとき 速度 ↓ になっているか
+
+
+■ 近道（骨格だけ試す）
+-------------------------------------------------------------
+ 動画をセッションフォルダ直下に置いて
+
+ python scripts\pose_extract_yolo.py --subject _sessions
+
+ videos\ を作る必要なし。pose\ が自動でできる。
+
+
+■ よくあるやつ
+-------------------------------------------------------------
+ no videos found   → --subject は data\ 直下のフォルダ名
+ データが来ない    → PCのIP変更 / ファイアウォール
+ mean Hz < 50      → PCをラックに近づける
+ rpe が空欄        → markers.csv に手で書く
+
+=============================================================

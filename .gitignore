@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Office lock files
+.~lock.*#
+
+# Pretrained model weights (regenerated via download, see docs)
+weights/*.pt
+
+# Raw / processed video (large, personal data)
+*.mp4
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Contains real WiFi SSID/password + local IPs — do not commit as-is
+firmware/*/*.ino

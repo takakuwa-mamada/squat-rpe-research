@@ -1,0 +1,11 @@
+# 1. セッションをセット単位に分割
+python split_session.py --subject S001 --session SES001
+
+# 2. 動画を data/S001/SES001/videos/ に set01.mp4 … として配置
+
+# 3. 骨格抽出
+python pose_extract_yolo.py --subject S001
+
+# 4. 特徴量抽出
+python extract_features.py --subject S001
+python aggregate_features.py
