@@ -1,0 +1,13 @@
+{
+  "session_dir": "session_20260918_005350",
+  "started_at": "2026-09-18 00:53:50",
+  "duration_s": 72.9,
+  "devices": {
+    "BAR": {
+      "n_samples": 7248,
+      "duration_s": 72.5,
+      "mean_hz": 100.0
+    }
+  },
+  "n_sets": 1
+}

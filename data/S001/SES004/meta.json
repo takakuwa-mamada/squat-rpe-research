@@ -1,0 +1,60 @@
+{
+  "session_id": "SES004",
+  "subject_id": "S001",
+  "date": "2026-09-18",
+  "source_sessions": [
+    "session_20260918_004509",
+    "session_20260918_005350",
+    "session_20260918_010423"
+  ],
+  "devices": [
+    "BAR"
+  ],
+  "sampling_hz": 100,
+  "exercise": "Squat",
+  "notes": "",
+  "sets": [
+    {
+      "set_no": 1,
+      "csv_filename": "set01_BAR.csv",
+      "video_filename": "set01.mp4",
+      "exercise": "Squat",
+      "weight_kg": 130,
+      "reps_planned": null,
+      "reps_completed": null,
+      "rpe": 7.0,
+      "rest_before_sec": null,
+      "duration_s": 5.49,
+      "source_session": "session_20260918_004509",
+      "notes": ""
+    },
+    {
+      "set_no": 2,
+      "csv_filename": "set02_BAR.csv",
+      "video_filename": "set02.mp4",
+      "exercise": "Squat",
+      "weight_kg": 160,
+      "reps_planned": null,
+      "reps_completed": null,
+      "rpe": 9.0,
+      "rest_before_sec": null,
+      "duration_s": 8.25,
+      "source_session": "session_20260918_005350",
+      "notes": ""
+    },
+    {
+      "set_no": 3,
+      "csv_filename": "set03_BAR.csv",
+      "video_filename": "set03.mp4",
+      "exercise": "Squat",
+      "weight_kg": 170,
+      "reps_planned": null,
+      "reps_completed": null,
+      "rpe": 9.0,
+      "rest_before_sec": null,
+      "duration_s": 7.19,
+      "source_session": "session_20260918_010423",
+      "notes": ""
+    }
+  ]
+}
