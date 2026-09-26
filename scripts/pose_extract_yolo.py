@@ -43,7 +43,7 @@ from ultralytics import YOLO
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 # プロジェクトルート: scripts/ 配下にあれば親、直下にあれば自分
-PROJECT_ROOT = SCRIPT_DIR.parent if (SCRIPT_DIR.parent / "data"/ "_sessions").is_dir() else SCRIPT_DIR
+PROJECT_ROOT = SCRIPT_DIR.parent if (SCRIPT_DIR.parent / "data").is_dir() else SCRIPT_DIR
 DATA_ROOT  = PROJECT_ROOT / "data"
 
 # モデル選択: n(nano) < s(small) < m(medium) < l(large) < x(xlarge)
