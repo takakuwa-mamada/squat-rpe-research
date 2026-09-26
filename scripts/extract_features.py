@@ -69,9 +69,10 @@ def lowpass(x, fs, fc=10.0, order=4):
 
 
 def highpass(x, fs, fc=0.3, order=2):
+    """カットオフが低いと端の歪みが長く続くので、端を十分に（1/fc 秒ぶん）折り返して延長する"""
     nyq = fs / 2.0
     b, a = butter(order, fc / nyq, btype="high")
-    return filtfilt(b, a, x)
+    return filtfilt(b, a, x, padtype="odd", padlen=min(len(x) - 1, int(fs / fc)))
 
 
 def integrate_trapz(x, dt):
@@ -161,13 +162,16 @@ def imu_vertical_velocity(imu_df: pd.DataFrame, fs: float, dt: float):
     """
     バーの鉛直加速度と速度を求める。
 
-    ・鉛直加速度 = 3軸合成加速度 − 重力の実測値
-      重力は「加速度の揺れが小さく、ジャイロ（オフセット除去後）も小さい」静かな区間の中央値。
-      → センサの向きの誤差や、静止時の値のずれ（SES004 では 1.05 g 前後）の影響を受けにくい
-    ・速度は積分後、ハイパス 0.15 Hz でドリフトを除く。
-      0.3 Hz だと遅い挙上（上昇 1.5 s 前後）まで削れて上昇区間が短く切れる（SES004 で確認）。
-      静止区間で v=0 に固定する方式（ZUPT）は、一定速度の下降も「静止」に見えるので使わない。
-    戻り値: (a_vert [m/s^2], v [m/s], 重力の実測値 [g])
+    1. 鉛直加速度 = 3軸合成加速度 − 重力の実測値
+       重力は「加速度の揺れが小さく、ジャイロ（オフセット除去後）も小さい」静かな区間の中央値。
+       → センサの向きの誤差や、静止時の値のずれ（SES004 では 1.05 g 前後）の影響を受けにくい
+    2. 静止点を探す: 加速度が静かで重力の実測値に近く、ハイパス（0.15 Hz）後の速度もほぼ 0 の区間
+       （一定速度の下降は加速度だけ見ると静止に見えるが、速度が大きいので選ばれない）
+    3. 速度 = 生の積分 − 静止点どうしを直線でつないだドリフト（ZUPT）
+       ハイパスの速度をそのまま使うと、遅いレップ（周期がカットオフに近い）の波形が削られて
+       MCV を過小評価する（合成データの 8 レップ目で約 25% 低く出た）
+       静止点が 2 つ未満のときだけ、ハイパスの速度を使う
+    戻り値: (a_vert [m/s^2], v [m/s], 重力の実測値 [g], 生の積分, ハイパス後の速度, 静止点)
     """
     ax = imu_df["ax_g"].to_numpy(); ay = imu_df["ay_g"].to_numpy(); az = imu_df["az_g"].to_numpy()
     n = len(az)
@@ -184,22 +188,100 @@ def imu_vertical_velocity(imu_df: pd.DataFrame, fs: float, dt: float):
 
     a_vert = (acc_lp - g_ref) * G
     v_raw = integrate_trapz(a_vert, dt)
-    v = highpass(v_raw, fs, fc=0.15) if n > int(fs * 3) else v_raw - np.mean(v_raw)
-    return a_vert, v, g_ref
+    v_hp = highpass(v_raw, fs, fc=0.15) if n > int(fs * 3) else v_raw - np.mean(v_raw)
+
+    # 遅いレップの上昇中も加速度の揺れは小さいが、加速・減速の局面では重力からずれるので除ける
+    still = quiet & (np.abs(acc_lp - g_ref) < 0.03) & (np.abs(v_hp) < 0.1)
+    centers, anchors, i = [], [], 0
+    min_len = max(3, int(0.1 * fs))
+    while i < n:
+        if still[i]:
+            j = i
+            while j + 1 < n and still[j + 1]:
+                j += 1
+            if j - i + 1 >= min_len:
+                centers.append((i + j) / 2.0)
+                anchors.append(float(np.mean(v_raw[i:j + 1])))
+            i = j + 1
+        else:
+            i += 1
+    if len(centers) >= 2:
+        v = v_raw - np.interp(np.arange(n), centers, anchors)
+    else:
+        v = v_hp
+    return a_vert, v, g_ref, v_raw, v_hp, [int(c) for c in centers]
+
+
+def select_reps(v_hp, fs, dt, expected_reps=None, min_rom=0.15):
+    """
+    おおまかな速度 v_hp からスクワットのレップを選ぶ。
+    戻り値: [(下降の始まり, 下降のピーク, 上昇のピーク), ...]（時刻順）
+
+    「直前に下降がある上昇ピーク」のうち、上昇の変位（ROM）が min_rom [m] 以上のものだけを採用する。
+    ラックアウト・ラックイン・歩き出しは上下動が数 cm なので外れる。
+    レップ数が分かっていれば、ROM の大きい順に N 個残す（速度の大きい順だとラックインを拾う）。
+    """
+    n = len(v_hp)
+    cands = []
+    for pk in detect_reps(v_hp, fs, expected_reps=None):
+        lo = max(0, pk - int(3.0 * fs))
+        dmin = lo + int(np.argmin(v_hp[lo:pk + 1]))
+        ds = dmin
+        while ds > 0 and v_hp[ds - 1] < -0.03:
+            ds -= 1
+        zb = dmin
+        while zb < pk and v_hp[zb] <= 0:
+            zb += 1
+        ze = pk
+        while ze < n - 1 and v_hp[ze + 1] > 0:
+            ze += 1
+        rom = float(np.sum(v_hp[zb:ze + 1]) * dt)
+        if rom >= min_rom:
+            cands.append((ds, dmin, int(pk), rom))
+    if expected_reps and len(cands) > expected_reps:
+        cands = sorted(sorted(cands, key=lambda c: c[3], reverse=True)[:expected_reps])
+    return [(ds, dmin, pk) for ds, dmin, pk, _ in cands]
+
+
+def solve_lockout(v_raw, a0, pk, fs, dt):
+    """
+    1レップ分のドリフトを解く。立位（a0: 速度 0）から始まり、ロックアウト T で
+    「速度 0 かつ 変位 0（立位の高さに戻る）」になるように、一定のずれ（センサのバイアス）を引く。
+    T は上昇ピーク以降で変位の残りが最小になる最初の時刻。
+    戻り値: (T, 補正後の速度 v[a0:T+1])
+    """
+    lo, hi = pk + max(1, int(0.05 * fs)), min(len(v_raw) - 1, pk + int(2.5 * fs))
+    results = []
+    for T in range(lo, hi + 1):
+        seg = v_raw[a0:T + 1] - v_raw[a0]
+        L = len(seg) - 1
+        if L <= 0:
+            continue
+        vc = seg - (seg[-1] / L) * np.arange(L + 1)
+        disp = float(np.sum((vc[:-1] + vc[1:]) / 2.0) * dt)
+        results.append((abs(disp), T, vc))
+    if not results:
+        seg = v_raw[a0:pk + 1] - v_raw[a0]
+        return pk, seg
+    best = min(r[0] for r in results)
+    T, vc = next((r[1], r[2]) for r in results if r[0] <= best + 0.005)
+    return T, vc
 
 
 def concentric_phase(v, a, p):
     """
     レップの上昇ピーク p を含むコンセントリック区間 [s, e] と、推進局面の終わり pe を返す。
-      s, e : v > 0 が続く区間の両端
+      s, e : 速度がピークの 5%（最低 0.02 m/s）を超えて続く区間の両端
+             （0 を境にすると、残ったわずかなずれで静止中まで上昇に数えてしまう）
       pe   : ピーク以降で加速度が −g を下回る直前（MPV の定義: 減速が重力より大きい局面を除く）
     """
     n = len(v)
+    thr = max(0.02, 0.05 * float(v[p]))
     s = p
-    while s > 0 and v[s - 1] > 0:
+    while s > 0 and v[s - 1] > thr:
         s -= 1
     e = p
-    while e < n - 1 and v[e + 1] > 0:
+    while e < n - 1 and v[e + 1] > thr:
         e += 1
     pe = e
     for i in range(p, e + 1):
@@ -233,8 +315,24 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
     gx = imu_df["gx_dps"].to_numpy()
     gy = imu_df["gy_dps"].to_numpy()
 
-    # 鉛直加速度（重力は静止区間で実測）と速度（静止区間でドリフト補正）
-    az_dyn_lp, v, g_ref = imu_vertical_velocity(imu_df, fs, dt_med)
+    # 鉛直加速度（重力は静止区間で実測）と速度（静止点の間でドリフト補正）
+    az_dyn_lp, v, g_ref, v_raw, v_hp, anchors = imu_vertical_velocity(imu_df, fs, dt_med)
+
+    # レップを選び、レップごとに「ロックアウトで速度0・変位0」でドリフトを解き直す
+    # （挙上の直後はすぐラックへ歩くので、ロックアウト後に静止区間が無いことが多い）
+    rep_idx = select_reps(v_hp, fs, dt_med, expected_reps=expected_reps)
+    v = v.copy()
+    peaks, prev_T = [], None
+    for ds, dmin, pk in rep_idx:
+        before = [c for c in anchors if c <= ds]
+        a0 = before[-1] if before else ds
+        if prev_T is not None and prev_T > a0:
+            a0 = prev_T
+        T, vc = solve_lockout(v_raw, a0, pk, fs, dt_med)
+        v[a0:T + 1] = vc
+        prev_T = T
+        peaks.append(int(dmin + np.argmax(v[dmin:T + 1])))
+    peaks = np.array(peaks, dtype=int)
 
     # 各種統計
     peak_v_up   = float(np.max(v))                # 上向きピーク速度
@@ -255,8 +353,6 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
     eccentric_time  = float(np.sum(v < -0.05) * dt_med)
     total_time = float(t[-1] - t[0])
 
-    # レップ検出
-    peaks = detect_reps(v, fs, expected_reps=expected_reps)
     n_reps = int(len(peaks))
 
     # レップごとの指標（ピーク速度・MCV・MPV・コンセントリック時間）
