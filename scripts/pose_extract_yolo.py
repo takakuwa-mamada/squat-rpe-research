@@ -181,6 +181,26 @@ COCO_SKELETON_LINES = [
 ]
 
 
+def select_person(r, prev_center):
+    """
+    複数人が検出されたときに挙上者1人を選ぶ。
+      初回      : 画面上で最も大きく映っている人（カメラに一番近い＝挙上者）
+      2回目以降 : 前フレームで選んだ人にボックス中心が最も近い人（追跡）
+    戻り値: (選んだ人の番号, そのボックス中心 or None)
+    """
+    boxes = getattr(r, "boxes", None)
+    n = len(r.keypoints.xyn)
+    if boxes is None or len(boxes) != n:
+        return 0, None
+    xywhn = boxes.xywhn.cpu().numpy()          # (n, 4): cx, cy, w, h
+    if prev_center is None:
+        best = int(np.argmax(xywhn[:, 2] * xywhn[:, 3]))
+    else:
+        d = np.hypot(xywhn[:, 0] - prev_center[0], xywhn[:, 1] - prev_center[1])
+        best = int(np.argmin(d))
+    return best, (float(xywhn[best, 0]), float(xywhn[best, 1]))
+
+
 def draw_skeleton(frame, kp_xy, kp_conf, conf_thresh=0.3):
     h, w = frame.shape[:2]
     pts_px = (kp_xy * np.array([w, h])).astype(int)
@@ -206,6 +226,7 @@ def process_one_video(model, video_path: Path, out_dir: Path,
     out_ft   = out_dir / f"{stem}_yolo_features.csv"
     out_vid  = out_dir / f"{stem}_yolo_annotated.mp4"
     out_plot = out_dir / f"{stem}_yolo_plots.png"
+    out_info = out_dir / f"{stem}_yolo_info.json"
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -226,6 +247,7 @@ def process_one_video(model, video_path: Path, out_dir: Path,
     pbar = tqdm(total=n_frm, desc=f"  {stem}", unit="frame", leave=False)
 
     frame_idx = 0
+    prev_center = None          # 前フレームで選んだ人物のボックス中心（正規化座標）
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -241,17 +263,15 @@ def process_one_video(model, video_path: Path, out_dir: Path,
             device=device,
         )
 
-        # 最も信頼度の高い人物1人を選ぶ
+        # 挙上者1人を選ぶ（ジムで他の人が映り込んでも追跡し続ける）
         kp_xy = None
         kp_conf = None
         if len(results) > 0 and results[0].keypoints is not None:
             r = results[0]
             if r.keypoints.xyn is not None and len(r.keypoints.xyn) > 0:
-                # 複数人検出されたら、ボックス信頼度が最大のものを選ぶ
-                if hasattr(r, "boxes") and r.boxes is not None and len(r.boxes) > 0:
-                    best = int(np.argmax(r.boxes.conf.cpu().numpy()))
-                else:
-                    best = 0
+                best, center = select_person(r, prev_center)
+                if center is not None:
+                    prev_center = center
                 kp_xy   = r.keypoints.xyn[best].cpu().numpy()   # (17, 2) normalized
                 kp_conf = r.keypoints.conf[best].cpu().numpy()  # (17,)
 
@@ -298,6 +318,11 @@ def process_one_video(model, video_path: Path, out_dir: Path,
     df_ft = pd.DataFrame(feature_rows)
     df_kp.to_csv(out_kp, index=False)
     df_ft.to_csv(out_ft, index=False)
+
+    # 動画の縦横サイズ（keypoints は 0〜1 正規化なので、角度・距離を正しく出すのに必要）
+    info = {"video": video_path.name, "width": w, "height": h,
+            "fps": fps, "n_frames": frame_idx, "model": str(getattr(model, "ckpt_path", "") or "")}
+    out_info.write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
 
     if save_plot and len(df_ft) > 0:
         make_feature_plot(df_ft, out_plot, title=stem)
@@ -385,6 +410,9 @@ def find_videos(filter_subject: Optional[str] = None):
             if video.parent.name == "pose" or "_annotated" in video.stem:
                 continue
             if filter_subject and parts[0] != filter_subject:
+                continue
+            # 協力者の受け取り置き場は ingest_remote.py で取り込んだ後に処理する
+            if parts[0] == "_remote" and filter_subject != "_remote":
                 continue
             # 出力先: videos/ の中なら1つ上、そうでなければ同じ階層に pose/ を作る
             if video.parent.name == "videos":

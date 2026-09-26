@@ -1,33 +1,42 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
- 1試技の生データから特徴量ベクトルを抽出するスクリプト
+ 1試技（1セット）の生データから特徴量ベクトルを抽出するスクリプト
 
  入力:
-   - IMU CSV:  data/<S>/<SES>/imu/setNN.csv
-   - Pose CSV: data/<S>/<SES>/pose/setNN_yolo_features.csv （YOLO26・優先）
-               data/<S>/<SES>/pose/setNN_features.csv      （MediaPipe）
-               ※どちらも無ければ骨格特徴なしで処理する
+   - IMU CSV:   data/<S>/<SES>/imu/setNN_BAR.csv        （無ければ動画のみの試技として扱う）
+   - 骨格:      data/<S>/<SES>/pose/setNN_yolo_keypoints.csv（YOLO26。無ければ骨格特徴なし）
+                data/<S>/<SES>/pose/setNN_yolo_info.json    （動画の縦横サイズ。無ければ動画から読む）
    - meta.json: data/<S>/<SES>/meta.json
+   - 被験者情報: data/subjects.json（身長・1RM。あれば %1RM と m/s 換算に使う）
 
  出力:
-   - data/<S>/<SES>/features/setNN_features.json (1試技ぶんの特徴量)
+   - data/<S>/<SES>/features/setNN_features.json（1試技ぶんの特徴量）
+     "_" で始まるキー（レップごとの詳細）は aggregate_features.py で CSV に入れない
+
+ 特徴量:
+   imu_*   バー IMU（速度・加速度・レップ単位の MCV/MPV・速度低下率）
+   pose_*  骨格（正面撮影用）: レップ分割、テンポ、深さ、肩の上下動から見たバー速度、
+           膝の開き（膝の内側への入り）、腰の横ブレ、肩・腰の傾き、体幹の側方傾斜、
+           1レップ目 → 最終レップの変化（疲労によるフォームの崩れ）
+           距離は「立位の肩〜足首の高さ」= 1 BL（body length）で正規化する
 
  使い方:
-   python extract_features.py                              # data/配下を全自動
-   python extract_features.py --subject S001
-   python extract_features.py --imu path.csv --meta meta.json --set_no 1
-   python extract_features.py --force
+   python scripts\\extract_features.py                    # data/ 配下を全自動
+   python scripts\\extract_features.py --subject S001
+   python scripts\\extract_features.py --force            # 既存の JSON も作り直す
+   python scripts\\extract_features.py --meta data\\S001\\SES004\\meta.json --set_no 1 \\
+       --imu data\\S001\\SES004\\imu\\set01_BAR.csv --pose data\\S001\\SES004\\pose\\set01_yolo_keypoints.csv
 
  依存ライブラリ:
-   pip install numpy pandas scipy
+   pip install numpy pandas scipy opencv-python
 =============================================================================
 """
 
-import os
 import sys
 import json
 import argparse
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -40,7 +49,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # プロジェクトルート: scripts/ 配下にあれば親、直下にあれば自分
 PROJECT_ROOT = SCRIPT_DIR.parent if (SCRIPT_DIR.parent / "data").is_dir() else SCRIPT_DIR
 DATA_ROOT  = PROJECT_ROOT / "data"
+SUBJECTS_JSON = DATA_ROOT / "subjects.json"
 G = 9.80665   # 重力加速度 [m/s^2]
+
+# 骨格
+POSE_CONF_MIN = 0.3      # これ未満の信頼度のキーポイントは欠損扱い
+POSE_LPF_HZ   = 6.0      # キーポイント軌跡のローパス
+# 身長に対する「肩峰〜足関節」の高さの比（Drillis & Contini: 肩峰高 0.818H − 足関節高 0.039H）
+SHOULDER_ANKLE_RATIO = 0.779
 
 
 # ===========================================================================
@@ -63,8 +79,37 @@ def integrate_trapz(x, dt):
     return np.concatenate([[0.0], np.cumsum((x[:-1] + x[1:]) / 2.0 * dt)])
 
 
+def _r(x, nd=4):
+    """JSON 用に丸める。NaN / None は None"""
+    if x is None:
+        return None
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(xf) or np.isinf(xf):
+        return None
+    return round(xf, nd)
+
+
+def _nanmean(arrs):
+    """複数配列の要素ごとの平均（片方だけ欠損ならもう片方を使う）"""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return np.nanmean(np.vstack(arrs), axis=0)
+
+
+def _nanstat(fn, x):
+    x = np.asarray(x, dtype=float)
+    if x.size == 0 or np.all(np.isnan(x)):
+        return float("nan")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        return float(fn(x))
+
+
 # ===========================================================================
-# レップ検出
+# IMU: レップ検出
 # ===========================================================================
 def detect_reps(v, fs, expected_reps=None):
     """
@@ -112,15 +157,70 @@ def detect_reps(v, fs, expected_reps=None):
     return reps
 
 
+def imu_vertical_velocity(imu_df: pd.DataFrame, fs: float, dt: float):
+    """
+    バーの鉛直加速度と速度を求める。
+
+    ・鉛直加速度 = 3軸合成加速度 − 重力の実測値
+      重力は「加速度の揺れが小さく、ジャイロ（オフセット除去後）も小さい」静かな区間の中央値。
+      → センサの向きの誤差や、静止時の値のずれ（SES004 では 1.05 g 前後）の影響を受けにくい
+    ・速度は積分後、ハイパス 0.15 Hz でドリフトを除く。
+      0.3 Hz だと遅い挙上（上昇 1.5 s 前後）まで削れて上昇区間が短く切れる（SES004 で確認）。
+      静止区間で v=0 に固定する方式（ZUPT）は、一定速度の下降も「静止」に見えるので使わない。
+    戻り値: (a_vert [m/s^2], v [m/s], 重力の実測値 [g])
+    """
+    ax = imu_df["ax_g"].to_numpy(); ay = imu_df["ay_g"].to_numpy(); az = imu_df["az_g"].to_numpy()
+    n = len(az)
+    acc = np.sqrt(ax ** 2 + ay ** 2 + az ** 2)
+    gyr = imu_df[["gx_dps", "gy_dps", "gz_dps"]].to_numpy(dtype=float)
+    gyr = np.linalg.norm(gyr - np.median(gyr, axis=0), axis=1)   # M5 のジャイロはオフセットが大きい
+    long_enough = n > int(fs * 0.5)
+    acc_lp = lowpass(acc, fs, fc=10.0) if long_enough else acc
+    gyr_lp = lowpass(gyr, fs, fc=5.0) if long_enough else gyr
+
+    acc_sd = pd.Series(acc_lp).rolling(max(3, int(0.2 * fs)), center=True, min_periods=3).std().to_numpy()
+    quiet = (acc_sd < 0.02) & (gyr_lp < 10.0)
+    g_ref = float(np.median(acc_lp[quiet])) if quiet.sum() > int(0.2 * fs) else float(np.median(acc_lp))
+
+    a_vert = (acc_lp - g_ref) * G
+    v_raw = integrate_trapz(a_vert, dt)
+    v = highpass(v_raw, fs, fc=0.15) if n > int(fs * 3) else v_raw - np.mean(v_raw)
+    return a_vert, v, g_ref
+
+
+def concentric_phase(v, a, p):
+    """
+    レップの上昇ピーク p を含むコンセントリック区間 [s, e] と、推進局面の終わり pe を返す。
+      s, e : v > 0 が続く区間の両端
+      pe   : ピーク以降で加速度が −g を下回る直前（MPV の定義: 減速が重力より大きい局面を除く）
+    """
+    n = len(v)
+    s = p
+    while s > 0 and v[s - 1] > 0:
+        s -= 1
+    e = p
+    while e < n - 1 and v[e + 1] > 0:
+        e += 1
+    pe = e
+    for i in range(p, e + 1):
+        if a[i] < -G:
+            pe = max(s, i - 1)
+            break
+    return s, e, pe
+
+
 # ===========================================================================
 # IMU 特徴量抽出
 # ===========================================================================
 def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
     """
     IMU CSV (timestamp_ms, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps)
-    から特徴量を計算
+    から特徴量を計算する。
 
     expected_reps: meta.json の reps_completed（分かっていれば検出を補正する）
+    注意: 3軸合成加速度を使うので向きの誤差には強いが、水平方向の加速度が大きいと誤差になる。
+          roll/pitch はジャイロの単純積分で
+          ドリフトを含むため、学習には使わない（train_rpe_model.py で除外）。
     """
     if len(imu_df) < 20:
         return {"imu_n_samples": len(imu_df), "imu_error": "too few samples"}
@@ -130,23 +230,11 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
     dt_med = float(np.median(np.diff(t)))
     fs = 1.0 / dt_med if dt_med > 0 else 100.0
 
-    ax = imu_df["ax_g"].to_numpy()
-    ay = imu_df["ay_g"].to_numpy()
-    az = imu_df["az_g"].to_numpy()
     gx = imu_df["gx_dps"].to_numpy()
     gy = imu_df["gy_dps"].to_numpy()
-    gz = imu_df["gz_dps"].to_numpy()
 
-    # 重力除去 + LPF
-    az_dyn = (az - 1.0) * G                       # [m/s^2]
-    az_dyn_lp = lowpass(az_dyn, fs, fc=10.0) if n > int(fs * 0.5) else az_dyn
-
-    # 鉛直速度（1回積分 + ハイパスでドリフト除去）
-    v_raw = integrate_trapz(az_dyn_lp, dt_med)
-    if n > int(fs * 3):
-        v = highpass(v_raw, fs, fc=0.3)
-    else:
-        v = v_raw - np.mean(v_raw)
+    # 鉛直加速度（重力は静止区間で実測）と速度（静止区間でドリフト補正）
+    az_dyn_lp, v, g_ref = imu_vertical_velocity(imu_df, fs, dt_med)
 
     # 各種統計
     peak_v_up   = float(np.max(v))                # 上向きピーク速度
@@ -163,7 +251,6 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
     mean_jerk = float(np.mean(np.abs(jerk)))
 
     # コンセントリック相 / エキセントリック相の時間
-    # vが正(上昇) / 負(下降) のフレーム数 × dt
     concentric_time = float(np.sum(v > 0.05) * dt_med)
     eccentric_time  = float(np.sum(v < -0.05) * dt_med)
     total_time = float(t[-1] - t[0])
@@ -172,30 +259,44 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
     peaks = detect_reps(v, fs, expected_reps=expected_reps)
     n_reps = int(len(peaks))
 
-    # 各レップのピーク速度
-    rep_peak_vs = [float(v[p]) for p in peaks]
-    first_rep_peak_v = rep_peak_vs[0] if rep_peak_vs else float("nan")
-    last_rep_peak_v  = rep_peak_vs[-1] if rep_peak_vs else float("nan")
-    mean_rep_peak_v  = float(np.mean(rep_peak_vs)) if rep_peak_vs else float("nan")
+    # レップごとの指標（ピーク速度・MCV・MPV・コンセントリック時間）
+    reps = []
+    for p in peaks:
+        s, e, pe = concentric_phase(v, az_dyn_lp, int(p))
+        reps.append({
+            "peak_t_s": float(t[p]),
+            "start_t_s": float(t[s]),
+            "end_t_s": float(t[e]),
+            "peak_v": float(v[p]),
+            "mcv": float(np.mean(v[s:e + 1])),
+            "mpv": float(np.mean(v[s:pe + 1])),
+            "concentric_s": float(t[e] - t[s]),
+        })
 
-    # Velocity Loss (VL) = (最初のレップピーク - 最終レップピーク) / 最初のレップピーク
+    def first(key):
+        return reps[0][key] if reps else float("nan")
+
+    def last(key):
+        return reps[-1][key] if reps else float("nan")
+
+    def mean(key):
+        return float(np.mean([r[key] for r in reps])) if reps else float("nan")
+
+    # Velocity Loss (VL) = (最初のレップ − 最終レップ) / 最初のレップ
     # 1レップのセットでは定義できないため None にする
-    if n_reps >= 2 and first_rep_peak_v > 0.01:
-        velocity_loss_pct = float(
-            (first_rep_peak_v - last_rep_peak_v) / first_rep_peak_v * 100.0
-        )
-    else:
-        velocity_loss_pct = float("nan")
+    def vloss(key):
+        if n_reps >= 2 and first(key) > 0.01:
+            return (first(key) - last(key)) / first(key) * 100.0
+        return float("nan")
 
-    # 水平方向ブレ（gx, gy積分 → 角度変化、その絶対値の最大）
+    # 水平方向ブレ（gx, gy 積分 → 角度変化。ドリフト込みなので参考値）
     roll  = integrate_trapz(gx, dt_med)
     pitch = integrate_trapz(gy, dt_med)
-    bar_roll_range  = float(np.max(roll)  - np.min(roll))
-    bar_pitch_range = float(np.max(pitch) - np.min(pitch))
 
     return {
         "imu_n_samples":              int(n),
         "imu_fs_hz":                  round(fs, 2),
+        "imu_gravity_ref_g":          round(g_ref, 4),
         "imu_total_time_s":           round(total_time, 3),
         "imu_concentric_time_s":      round(concentric_time, 3),
         "imu_eccentric_time_s":       round(eccentric_time, 3),
@@ -206,72 +307,359 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
         "imu_mean_velocity_down_mps": round(mean_v_down, 4),
 
         "imu_n_reps_detected":         n_reps,
-        "imu_first_rep_peak_v_mps":    round(first_rep_peak_v, 4) if not np.isnan(first_rep_peak_v) else None,
-        "imu_last_rep_peak_v_mps":     round(last_rep_peak_v,  4) if not np.isnan(last_rep_peak_v)  else None,
-        "imu_mean_rep_peak_v_mps":     round(mean_rep_peak_v,  4) if not np.isnan(mean_rep_peak_v)  else None,
-        "imu_velocity_loss_pct":       round(velocity_loss_pct, 2) if not np.isnan(velocity_loss_pct) else None,
+        "imu_first_rep_peak_v_mps":    _r(first("peak_v")),
+        "imu_last_rep_peak_v_mps":     _r(last("peak_v")),
+        "imu_mean_rep_peak_v_mps":     _r(mean("peak_v")),
+        "imu_velocity_loss_pct":       _r(vloss("peak_v"), 2),
+
+        # VBT の標準指標（レップ単位）
+        "imu_first_rep_mcv_mps":       _r(first("mcv")),
+        "imu_last_rep_mcv_mps":        _r(last("mcv")),
+        "imu_mean_rep_mcv_mps":        _r(mean("mcv")),
+        "imu_first_rep_mpv_mps":       _r(first("mpv")),
+        "imu_mean_rep_mpv_mps":        _r(mean("mpv")),
+        "imu_velocity_loss_mcv_pct":   _r(vloss("mcv"), 2),
+        "imu_first_rep_concentric_s":  _r(first("concentric_s"), 3),
+        "imu_mean_rep_concentric_s":   _r(mean("concentric_s"), 3),
 
         "imu_rms_accel_mps2":          round(rms_a, 4),
         "imu_peak_accel_mps2":         round(peak_a, 4),
         "imu_max_jerk_mps3":           round(max_jerk, 2),
         "imu_mean_jerk_mps3":          round(mean_jerk, 2),
 
-        "imu_bar_roll_range_deg":      round(bar_roll_range, 2),
-        "imu_bar_pitch_range_deg":     round(bar_pitch_range, 2),
+        "imu_bar_roll_range_deg":      round(float(np.max(roll) - np.min(roll)), 2),
+        "imu_bar_pitch_range_deg":     round(float(np.max(pitch) - np.min(pitch)), 2),
+
+        "_imu_reps": [{k: round(val, 4) for k, val in r.items()} for r in reps],
     }
 
 
 # ===========================================================================
-# Pose 特徴量抽出（現状は visibility と簡易統計のみ。深さ等は後で追加）
+# 骨格: 前処理
 # ===========================================================================
-def compute_pose_features(pose_df: Optional[pd.DataFrame]) -> dict:
-    if pose_df is None or len(pose_df) == 0:
-        return {
-            "pose_available":           False,
-            "pose_n_frames":            0,
-            "pose_key_visibility_mean": None,
-            "pose_key_visibility_min":  None,
-        }
+POSE_POINTS = ["left_shoulder", "right_shoulder", "left_hip", "right_hip",
+               "left_knee", "right_knee", "left_ankle", "right_ankle"]
 
-    vis = pose_df["key_visibility"].dropna()
-    if len(vis) == 0:
-        return {
-            "pose_available":           False,
-            "pose_n_frames":            int(len(pose_df)),
-            "pose_key_visibility_mean": None,
-            "pose_key_visibility_min":  None,
-        }
 
-    return {
+def _fill_smooth(sig, fs, max_gap_s=0.3):
+    """短い欠損を線形補間し、ローパスで平滑化する（長い欠損は NaN のまま残す）"""
+    s = pd.Series(sig, dtype=float).interpolate(
+        limit=max(1, int(max_gap_s * fs)), limit_area="inside")
+    arr = s.to_numpy()
+    ok = ~np.isnan(arr)
+    if ok.sum() > max(15, int(fs * 0.5)) and fs > 2.5 * POSE_LPF_HZ:
+        filled = pd.Series(arr).ffill().bfill().to_numpy()
+        sm = lowpass(filled, fs, fc=POSE_LPF_HZ)
+        sm[~ok] = np.nan
+        return sm
+    return arr
+
+
+def _load_points(kp_df, w, h, fs):
+    """キーポイントをピクセル座標（縦横比を保った座標）に戻し、平滑化して返す"""
+    pts = {}
+    for name in POSE_POINTS:
+        x = kp_df[f"{name}_x"].to_numpy(dtype=float) * w
+        y = kp_df[f"{name}_y"].to_numpy(dtype=float) * h
+        c = kp_df[f"{name}_conf"].to_numpy(dtype=float)
+        bad = ~(c >= POSE_CONF_MIN)
+        x[bad] = np.nan
+        y[bad] = np.nan
+        pts[name] = (_fill_smooth(x, fs), _fill_smooth(y, fs))
+    return pts
+
+
+def _tilt_deg(xl, yl, xr, yr):
+    """左右2点を結ぶ線の水平からの傾き [deg]（右が下がると正）"""
+    return np.degrees(np.arctan2(yr - yl, np.abs(xr - xl)))
+
+
+# ===========================================================================
+# 骨格: レップ分割
+# ===========================================================================
+def detect_pose_reps(depth, fs, expected_reps=None):
+    """
+    depth: 立位からの肩の下がり量 [BL]（下が正）
+    戻り値: [(start, bottom, end), ...] フレーム番号
+
+    ラックアウトの歩き出しでは肩はほとんど沈まないので、
+    沈み込みの大きさ（prominence）でしゃがみ動作だけを拾う。
+    """
+    d = pd.Series(depth).interpolate(limit_direction="both").to_numpy()
+    if np.all(np.isnan(d)):
+        return []
+    peaks, props = find_peaks(d, prominence=0.08, distance=max(1, int(fs * 0.8)))
+    if len(peaks) == 0:
+        return []
+    prom = props["prominences"]
+    keep = prom >= max(0.08, 0.5 * float(np.max(prom)))
+    peaks, prom = peaks[keep], prom[keep]
+    if expected_reps and len(peaks) > expected_reps:
+        idx = np.argsort(prom)[::-1][:expected_reps]
+        peaks = np.sort(peaks[idx])
+
+    reps = []
+    bounds = [0] + list(peaks) + [len(d) - 1]
+    for k, b in enumerate(peaks):
+        lo, hi = bounds[k], bounds[k + 2]
+        base_before = float(np.min(d[lo:b + 1]))
+        base_after  = float(np.min(d[b:hi + 1]))
+        thr_b = base_before + 0.1 * (d[b] - base_before)
+        thr_a = base_after  + 0.1 * (d[b] - base_after)
+        s = b
+        while s > lo and d[s - 1] > thr_b:
+            s -= 1
+        e = b
+        while e < hi and d[e + 1] > thr_a:
+            e += 1
+        reps.append((int(s), int(b), int(e)))
+    return reps
+
+
+# ===========================================================================
+# 骨格特徴量
+# ===========================================================================
+POSE_MOTION_KEYS = [
+    "pose_n_reps_detected",
+    "pose_first_rep_mcv_bl", "pose_last_rep_mcv_bl", "pose_mean_rep_mcv_bl",
+    "pose_first_rep_peak_v_bl", "pose_mean_rep_peak_v_bl", "pose_velocity_loss_pct",
+    "pose_mean_descent_s", "pose_mean_ascent_s", "pose_mean_bottom_pause_s",
+    "pose_ascent_time_ratio",
+    "pose_mean_depth_bl", "pose_depth_change_bl", "pose_mean_hip_knee_dy_bl",
+    "pose_mean_sticking_ratio",
+    "pose_first_rep_mcv_mps_est", "pose_mean_rep_peak_v_mps_est",
+]
+POSE_FRONTAL_KEYS = [
+    "pose_min_knee_ankle_ratio", "pose_knee_ankle_ratio_change",
+    "pose_max_lateral_shift_bl", "pose_lateral_shift_change_bl",
+    "pose_max_shoulder_tilt_deg", "pose_shoulder_tilt_change_deg",
+    "pose_max_hip_tilt_deg", "pose_max_trunk_side_lean_deg",
+]
+
+
+def _pose_empty(reason, n_frames=0):
+    d = {"pose_available": False, "pose_n_frames": int(n_frames), "pose_error": reason}
+    for k in POSE_MOTION_KEYS + POSE_FRONTAL_KEYS:
+        d[k] = None
+    return d
+
+
+def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None, fps=None,
+                          view="front", expected_reps=None, height_cm=None) -> dict:
+    """
+    骨格キーポイント（setNN_yolo_keypoints.csv）から運動特徴を計算する。
+
+    view      : "front"（正面）なら膝の開き・横ブレ・傾きも出す。それ以外は共通の特徴のみ
+    height_cm : 身長が分かれば BL/s を m/s に換算した推定値も出す
+    """
+    if kp_df is None or len(kp_df) == 0:
+        return _pose_empty("no keypoints")
+    n = len(kp_df)
+    if not width or not height:
+        return _pose_empty("video size unknown", n)
+
+    if not fps or fps <= 0:
+        dt = np.median(np.diff(kp_df["time_s"].to_numpy()))
+        fps = 1.0 / dt if dt > 0 else 30.0
+    fs = float(fps)
+
+    # 品質
+    valid = kp_df["left_hip_x"].notna().to_numpy()
+    conf = np.vstack([kp_df[f"{p}_conf"].to_numpy(dtype=float) for p in POSE_POINTS])
+    vis = conf.mean(axis=0)[valid]
+    quality = {
         "pose_available":           True,
-        "pose_n_frames":            int(len(pose_df)),
-        "pose_n_valid_frames":      int(len(vis)),
-        "pose_key_visibility_mean": round(float(vis.mean()), 4),
-        "pose_key_visibility_min":  round(float(vis.min()),  4),
-        "pose_nan_ratio":           round(1.0 - len(vis) / len(pose_df), 4),
+        "pose_n_frames":            int(n),
+        "pose_nan_ratio":           _r(1.0 - valid.mean()),
+        "pose_key_visibility_mean": _r(vis.mean() if len(vis) else np.nan),
+        "pose_key_visibility_min":  _r(vis.min() if len(vis) else np.nan),
+        # 全身が画面に収まっているか（足首・頭が画面端で切れていない）
+        "pose_ankle_y_max_norm":    _r(np.nanpercentile(
+            kp_df[["left_ankle_y", "right_ankle_y"]].to_numpy(dtype=float), 99)
+            if valid.any() else np.nan),
     }
+
+    pts = _load_points(kp_df, width, height, fs)
+    lsx, lsy = pts["left_shoulder"];  rsx, rsy = pts["right_shoulder"]
+    lhx, lhy = pts["left_hip"];       rhx, rhy = pts["right_hip"]
+    lkx, lky = pts["left_knee"];      rkx, rky = pts["right_knee"]
+    lax, lay = pts["left_ankle"];     rax, ray = pts["right_ankle"]
+
+    sh_x, sh_y = _nanmean([lsx, rsx]), _nanmean([lsy, rsy])
+    hip_x, hip_y = _nanmean([lhx, rhx]), _nanmean([lhy, rhy])
+    kn_y = _nanmean([lky, rky])
+    an_x, an_y = _nanmean([lax, rax]), _nanmean([lay, ray])
+
+    # 体の大きさ: 立位の肩〜足首の高さ（ピクセル）= 1 BL
+    body_len = _nanstat(lambda a: np.percentile(a, 95), an_y - sh_y)
+    quality["pose_body_len_px"] = _r(body_len, 1)
+    if np.isnan(body_len) or body_len < 50:
+        d = _pose_empty("body too small or not detected", n)
+        d.update(quality)
+        d["pose_available"] = False
+        return d
+
+    # 肩の沈み込み（≒バーの鉛直位置）と上向き速度
+    stand_y = _nanstat(lambda a: np.percentile(a, 5), sh_y)
+    depth = (sh_y - stand_y) / body_len                 # [BL] 下が正
+    v_up = -np.gradient(depth) * fs                     # [BL/s] 上が正
+
+    reps_idx = detect_pose_reps(depth, fs, expected_reps=expected_reps)
+
+    # 正面用の時系列
+    frontal = (view == "front")
+    knee_ankle = np.abs(lkx - rkx) / np.abs(lax - rax)  # 膝の開き / 足首の開き（小さいほど膝が内側）
+    lateral = (hip_x - an_x) / body_len                 # 腰の横位置（足首中点基準）
+    sh_tilt = _tilt_deg(lsx, lsy, rsx, rsy)
+    hip_tilt = _tilt_deg(lhx, lhy, rhx, rhy)
+    trunk_side = np.degrees(np.arctan2(sh_x - hip_x, hip_y - sh_y))
+
+    def rel_absmax(sig, s, e):
+        """レップ開始時点を基準にした変化量の絶対値の最大（カメラの傾きを打ち消す）"""
+        seg = sig[s:e + 1]
+        ref = _nanstat(np.median, sig[s:min(e, s + max(2, int(0.2 * fs))) + 1])
+        return _nanstat(np.max, np.abs(seg - ref))
+
+    reps = []
+    for s, b, e in reps_idx:
+        seg_v = v_up[b:e + 1]
+        exc = depth[b] - _nanstat(np.min, depth[s:b + 1])
+        # ボトムでの停止時間: 沈み込みが最深の 95% 以上の区間
+        thr = depth[b] - 0.05 * exc
+        l, r = b, b
+        while l > s and depth[l - 1] >= thr:
+            l -= 1
+        while r < e and depth[r + 1] >= thr:
+            r += 1
+        # スティッキングポイント: 上昇中に速度が一度落ち込む度合い（最小/最大）
+        sv = np.nan_to_num(seg_v, nan=0.0)
+        vp, _ = find_peaks(sv, prominence=0.03)
+        sticking = (float(np.min(sv[vp[0]:vp[-1] + 1]) / np.max(sv))
+                    if len(vp) >= 2 and np.max(sv) > 0 else 1.0)
+        rep = {
+            "start_t_s": s / fs, "bottom_t_s": b / fs, "end_t_s": e / fs,
+            "descent_s": (b - s) / fs, "ascent_s": (e - b) / fs, "pause_s": (r - l) / fs,
+            "mcv_bl": _nanstat(np.mean, seg_v), "peak_v_bl": _nanstat(np.max, seg_v),
+            "depth_bl": float(depth[b]),
+            "hip_knee_dy_bl": float((hip_y[b] - kn_y[b]) / body_len),   # 正: 腰が膝より下
+            "sticking_ratio": sticking,
+        }
+        if frontal:
+            rep.update({
+                "knee_ankle_min": _nanstat(np.min, knee_ankle[b:e + 1]),
+                "lateral_shift_bl": rel_absmax(lateral, s, e),
+                "shoulder_tilt_deg": rel_absmax(sh_tilt, s, e),
+                "hip_tilt_deg": rel_absmax(hip_tilt, s, e),
+                "trunk_side_lean_deg": rel_absmax(trunk_side, s, e),
+            })
+        reps.append(rep)
+
+    nr = len(reps)
+
+    def col(k):
+        return np.array([r.get(k, np.nan) for r in reps], dtype=float)
+
+    def first(k):
+        return col(k)[0] if nr else np.nan
+
+    def last(k):
+        return col(k)[-1] if nr else np.nan
+
+    def mean(k):
+        return _nanstat(np.mean, col(k)) if nr else np.nan
+
+    def change(k):
+        return last(k) - first(k) if nr >= 2 else np.nan
+
+    m_per_bl = SHOULDER_ANKLE_RATIO * float(height_cm) / 100.0 if height_cm else np.nan
+    vl = ((first("mcv_bl") - last("mcv_bl")) / first("mcv_bl") * 100.0
+          if nr >= 2 and first("mcv_bl") > 0.01 else np.nan)
+
+    feat = {
+        "pose_n_reps_detected":        nr,
+        "pose_first_rep_mcv_bl":       _r(first("mcv_bl")),
+        "pose_last_rep_mcv_bl":        _r(last("mcv_bl")),
+        "pose_mean_rep_mcv_bl":        _r(mean("mcv_bl")),
+        "pose_first_rep_peak_v_bl":    _r(first("peak_v_bl")),
+        "pose_mean_rep_peak_v_bl":     _r(mean("peak_v_bl")),
+        "pose_velocity_loss_pct":      _r(vl, 2),
+        "pose_mean_descent_s":         _r(mean("descent_s"), 3),
+        "pose_mean_ascent_s":          _r(mean("ascent_s"), 3),
+        "pose_mean_bottom_pause_s":    _r(mean("pause_s"), 3),
+        "pose_ascent_time_ratio":      _r(last("ascent_s") / first("ascent_s")
+                                          if nr >= 2 and first("ascent_s") > 0 else np.nan, 3),
+        "pose_mean_depth_bl":          _r(mean("depth_bl")),
+        "pose_depth_change_bl":        _r(change("depth_bl")),
+        "pose_mean_hip_knee_dy_bl":    _r(mean("hip_knee_dy_bl")),
+        "pose_mean_sticking_ratio":    _r(mean("sticking_ratio"), 3),
+        "pose_first_rep_mcv_mps_est":  _r(first("mcv_bl") * m_per_bl),
+        "pose_mean_rep_peak_v_mps_est": _r(mean("peak_v_bl") * m_per_bl),
+    }
+    if frontal:
+        feat.update({
+            "pose_min_knee_ankle_ratio":     _r(_nanstat(np.min, col("knee_ankle_min")) if nr else np.nan),
+            "pose_knee_ankle_ratio_change":  _r(change("knee_ankle_min")),
+            "pose_max_lateral_shift_bl":     _r(_nanstat(np.max, col("lateral_shift_bl")) if nr else np.nan),
+            "pose_lateral_shift_change_bl":  _r(change("lateral_shift_bl")),
+            "pose_max_shoulder_tilt_deg":    _r(_nanstat(np.max, col("shoulder_tilt_deg")) if nr else np.nan, 2),
+            "pose_shoulder_tilt_change_deg": _r(change("shoulder_tilt_deg"), 2),
+            "pose_max_hip_tilt_deg":         _r(_nanstat(np.max, col("hip_tilt_deg")) if nr else np.nan, 2),
+            "pose_max_trunk_side_lean_deg":  _r(_nanstat(np.max, col("trunk_side_lean_deg")) if nr else np.nan, 2),
+        })
+    else:
+        feat.update({k: None for k in POSE_FRONTAL_KEYS})
+
+    feat["_pose_reps"] = [{k: _r(val, 4) for k, val in r.items()} for r in reps]
+    return {**quality, **feat}
 
 
 # ===========================================================================
-# meta.json から該当セットの情報を引く
+# 補助: meta / 被験者情報 / 動画サイズ
 # ===========================================================================
 def find_set_meta(meta: dict, set_no: int) -> dict:
-    sets = meta.get("sets", [])
-    for s in sets:
+    for s in meta.get("sets", []):
         if int(s.get("set_no", -1)) == int(set_no):
             return s
     return {}
 
 
+def load_subject_profile(subject_id: Optional[str]) -> dict:
+    """data/subjects.json から被験者のプロフィール（身長・1RM など）を読む"""
+    if not subject_id or not SUBJECTS_JSON.exists():
+        return {}
+    try:
+        subs = json.loads(SUBJECTS_JSON.read_text(encoding="utf-8")).get("subjects", {})
+        return subs.get(subject_id, {}).get("profile", {}) or {}
+    except Exception:
+        return {}
+
+
+def load_video_info(kp_csv: Optional[Path], video: Optional[Path]):
+    """(width, height, fps)。pose_extract_yolo.py の info JSON → 無ければ動画から読む"""
+    if kp_csv is not None:
+        info = kp_csv.with_name(kp_csv.name.replace("_yolo_keypoints.csv", "_yolo_info.json"))
+        if info.exists():
+            d = json.loads(info.read_text(encoding="utf-8"))
+            return d.get("width"), d.get("height"), d.get("fps")
+    if video is not None and video.exists():
+        import cv2
+        cap = cv2.VideoCapture(str(video))
+        w, h, fps = cap.get(3), cap.get(4), cap.get(5)
+        cap.release()
+        if w and h:
+            return int(w), int(h), float(fps) if fps else None
+    return None, None, None
+
+
 # ===========================================================================
 # 1試技ぶんの特徴量を計算
 # ===========================================================================
-def extract_one_trial(imu_csv: Path, pose_csv: Optional[Path],
-                      meta_json: Path, set_no: int) -> dict:
-    # メタ（レップ数をレップ検出に使うので先に読む）
+def extract_one_trial(imu_csv: Optional[Path], kp_csv: Optional[Path],
+                      meta_json: Path, set_no: int, video: Optional[Path] = None) -> dict:
     with open(meta_json, "r", encoding="utf-8") as f:
         meta = json.load(f)
     set_meta = find_set_meta(meta, set_no)
+    profile = load_subject_profile(meta.get("subject_id"))
 
     expected_reps = set_meta.get("reps_completed") or set_meta.get("reps_planned")
     try:
@@ -279,123 +667,116 @@ def extract_one_trial(imu_csv: Path, pose_csv: Optional[Path],
     except (TypeError, ValueError):
         expected_reps = None
 
-    # IMU
-    imu_df = pd.read_csv(imu_csv)
-    imu_feat = compute_imu_features(imu_df, expected_reps=expected_reps)
+    # IMU（あれば）
+    imu_feat = {}
+    if imu_csv is not None and imu_csv.exists():
+        imu_feat = compute_imu_features(pd.read_csv(imu_csv), expected_reps=expected_reps)
 
-    # Pose（あれば）
-    pose_df = None
-    if pose_csv is not None and pose_csv.exists():
+    # 骨格（あれば）
+    view = set_meta.get("camera_view") or meta.get("camera_view") or "front"
+    kp_df = None
+    if kp_csv is not None and kp_csv.exists():
         try:
-            pose_df = pd.read_csv(pose_csv)
+            kp_df = pd.read_csv(kp_csv)
         except Exception:
-            pose_df = None
-    pose_feat = compute_pose_features(pose_df)
+            kp_df = None
+    w, h, fps = load_video_info(kp_csv, video)
+    pose_feat = compute_pose_features(kp_df, w, h, fps, view=view,
+                                      expected_reps=expected_reps,
+                                      height_cm=profile.get("height_cm"))
+
+    weight = set_meta.get("weight_kg")
+    one_rm = profile.get("squat_1rm_kg")
+    pct_1rm = (float(weight) / float(one_rm) * 100.0) if weight and one_rm else None
 
     meta_feat = {
         "subject_id":      meta.get("subject_id"),
         "session_id":      meta.get("session_id"),
         "date":            meta.get("date"),
         "set_no":          int(set_no),
+        "modality":        "imu+video" if imu_feat else "video",
+        "camera_view":     view,
         "exercise":        set_meta.get("exercise", meta.get("exercise")),
-        "weight_kg":       set_meta.get("weight_kg"),
+        "weight_kg":       weight,
+        "pct_1rm":         _r(pct_1rm, 2),
         "reps_planned":    set_meta.get("reps_planned"),
         "reps_completed":  set_meta.get("reps_completed"),
         "rpe":             set_meta.get("rpe"),
         "rest_before_sec": set_meta.get("rest_before_sec"),
         "set_notes":       set_meta.get("notes"),
     }
-
     return {**meta_feat, **imu_feat, **pose_feat}
-
-
-# ===========================================================================
-# 骨格推定結果の探索
-# ===========================================================================
-def find_pose_csv(pose_dir: Path, vid_name: Optional[str]):
-    """
-    骨格推定の結果CSVを探す。モデルによって命名が違うため候補を順に試す。
-
-        set01_yolo_features.csv   … YOLO26版（優先）
-        set01_features.csv        … MediaPipe版
-
-    動画名が未設定でも、pose/ の中から setNN に対応するものを拾う。
-    """
-    if not pose_dir.is_dir():
-        return None
-
-    stems = []
-    if vid_name:
-        stems.append(Path(vid_name).stem)
-
-    for stem in stems:
-        for suffix in ("_yolo_features.csv", "_features.csv"):
-            cand = pose_dir / f"{stem}{suffix}"
-            if cand.exists():
-                return cand
-    return None
 
 
 # ===========================================================================
 # data/ 配下を走査して全試技を抽出
 # ===========================================================================
+def find_pose_keypoints(pose_dir: Path, vid_name: Optional[str], set_no: int) -> Optional[Path]:
+    """pose/ から setNN に対応する YOLO の keypoints CSV を探す"""
+    if not pose_dir.is_dir():
+        return None
+    stems = []
+    if vid_name:
+        stems.append(Path(vid_name).stem)
+    stems.append(f"set{int(set_no):02d}")
+    for stem in stems:
+        cand = pose_dir / f"{stem}_yolo_keypoints.csv"
+        if cand.exists():
+            return cand
+    return None
+
+
 def find_trials(filter_subject: Optional[str] = None):
-    """戻り値: [(imu_csv, pose_csv_or_None, meta_json, set_no, out_json), ...]"""
+    """戻り値: [(imu_csv or None, kp_csv or None, video or None, meta_json, set_no, out_json), ...]"""
     results = []
     if not DATA_ROOT.exists():
         return results
-    for meta_json in DATA_ROOT.rglob("meta.json"):
+    for meta_json in sorted(DATA_ROOT.rglob("meta.json")):
         parts = meta_json.relative_to(DATA_ROOT).parts
-        if len(parts) < 3:
+        if len(parts) != 3 or parts[0].startswith("_"):
             continue
         subj, sess = parts[0], parts[1]
         if filter_subject and subj != filter_subject:
             continue
         try:
-            with open(meta_json, "r", encoding="utf-8") as f:
-                meta = json.load(f)
+            meta = json.loads(meta_json.read_text(encoding="utf-8"))
         except Exception:
             continue
-        sets = meta.get("sets", [])
-        for s in sets:
-            set_no   = s.get("set_no")
+        sess_dir = DATA_ROOT / subj / sess
+        for s in meta.get("sets", []):
+            set_no = s.get("set_no")
+            if set_no is None:
+                continue
             csv_name = s.get("csv_filename")
             vid_name = s.get("video_filename")
-            if set_no is None or csv_name is None:
-                continue
-            imu_csv  = DATA_ROOT / subj / sess / "imu"   / csv_name
-            pose_csv = find_pose_csv(DATA_ROOT / subj / sess / "pose", vid_name)
-            feat_dir = DATA_ROOT / subj / sess / "features"
-            out_json = feat_dir / f"set{int(set_no):02d}_features.json"
-            results.append((imu_csv, pose_csv, meta_json, int(set_no), out_json))
+            imu_csv = sess_dir / "imu" / csv_name if csv_name else None
+            video = sess_dir / "videos" / vid_name if vid_name else None
+            kp_csv = find_pose_keypoints(sess_dir / "pose", vid_name, set_no)
+            out_json = sess_dir / "features" / f"set{int(set_no):02d}_features.json"
+            results.append((imu_csv, kp_csv, video, meta_json, int(set_no), out_json))
     return results
-
-
-def is_already_processed(out_json: Path) -> bool:
-    return out_json.exists()
 
 
 # ===========================================================================
 # メイン
 # ===========================================================================
 def main():
-    ap = argparse.ArgumentParser(description="Extract features for one or all trials")
-    ap.add_argument("--imu", type=str, default=None)
-    ap.add_argument("--pose", type=str, default=None)
-    ap.add_argument("--meta", type=str, default=None)
-    ap.add_argument("--set_no", type=int, default=None)
-    ap.add_argument("--subject", type=str, default=None)
-    ap.add_argument("--force", action="store_true")
+    ap = argparse.ArgumentParser(description="1試技ごとの特徴量を抽出する")
+    ap.add_argument("--imu", type=str, default=None, help="単一試技: IMU CSV")
+    ap.add_argument("--pose", type=str, default=None, help="単一試技: setNN_yolo_keypoints.csv")
+    ap.add_argument("--meta", type=str, default=None, help="単一試技: meta.json")
+    ap.add_argument("--set_no", type=int, default=None, help="単一試技: セット番号")
+    ap.add_argument("--subject", type=str, default=None, help="例: S001")
+    ap.add_argument("--force", action="store_true", help="既存の JSON も作り直す")
     args = ap.parse_args()
 
     # 単一試技モード
-    if args.imu:
-        if not (args.meta and args.set_no is not None):
-            sys.exit("[ERROR] --imu のときは --meta と --set_no が必要")
-        imu_csv  = Path(args.imu).resolve()
-        pose_csv = Path(args.pose).resolve() if args.pose else None
-        meta_json = Path(args.meta).resolve()
-        feat = extract_one_trial(imu_csv, pose_csv, meta_json, args.set_no)
+    if args.meta:
+        if args.set_no is None:
+            sys.exit("[ERROR] --meta のときは --set_no が必要")
+        imu_csv = Path(args.imu).resolve() if args.imu else None
+        kp_csv = Path(args.pose).resolve() if args.pose else None
+        feat = extract_one_trial(imu_csv, kp_csv, Path(args.meta).resolve(), args.set_no)
         print(json.dumps(feat, indent=2, ensure_ascii=False))
         return
 
@@ -403,33 +784,36 @@ def main():
     print(f"[BATCH] scanning {DATA_ROOT}")
     trials = find_trials(filter_subject=args.subject)
     if not trials:
-        print("[INFO] no trials found")
-        print(f"  Expected: {DATA_ROOT}/<subject>/<session>/meta.json + imu/setNN.csv")
+        print("[INFO] 試技が見つかりません")
+        print(f"  想定: {DATA_ROOT}/<被験者>/<セッション>/meta.json")
         return
 
-    pending = []
-    skipped = 0
-    for imu_csv, pose_csv, meta_json, set_no, out_json in trials:
-        if (not args.force) and is_already_processed(out_json):
+    pending, skipped = [], 0
+    for tr in trials:
+        imu_csv, kp_csv, video, meta_json, set_no, out_json = tr
+        if (not args.force) and out_json.exists():
             skipped += 1
             continue
-        if not imu_csv.exists():
-            print(f"  [SKIP] IMU not found: {imu_csv}")
+        has_imu = imu_csv is not None and imu_csv.exists()
+        if not has_imu and kp_csv is None:
+            print(f"  [SKIP] IMU も骨格もありません: {meta_json.parent.name} set{set_no:02d}"
+                  f"（先に pose_extract_yolo.py を実行）")
             continue
-        pending.append((imu_csv, pose_csv, meta_json, set_no, out_json))
+        pending.append(tr)
 
-    print(f"[INFO] To process: {len(pending)} trials (skipped: {skipped})")
-    for imu_csv, pose_csv, meta_json, set_no, out_json in pending:
-        rel = imu_csv.relative_to(DATA_ROOT)
-        print(f"\n[RUN] {rel} (set_no={set_no})")
+    print(f"[INFO] 処理対象: {len(pending)} 試技 (処理済みでスキップ: {skipped})")
+    for imu_csv, kp_csv, video, meta_json, set_no, out_json in pending:
+        rel = out_json.parent.parent.relative_to(DATA_ROOT)
+        print(f"\n[RUN] {rel} set{set_no:02d}")
         try:
-            feat = extract_one_trial(imu_csv, pose_csv, meta_json, set_no)
+            feat = extract_one_trial(imu_csv, kp_csv, meta_json, set_no, video=video)
             out_json.parent.mkdir(parents=True, exist_ok=True)
-            with open(out_json, "w", encoding="utf-8") as f:
-                json.dump(feat, f, indent=2, ensure_ascii=False)
-            print(f"  rpe={feat.get('rpe')}, weight={feat.get('weight_kg')}, "
-                  f"reps_detected={feat.get('imu_n_reps_detected')}, "
-                  f"peak_v={feat.get('imu_peak_velocity_up_mps')}")
+            out_json.write_text(json.dumps(feat, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"  RPE={feat.get('rpe')}  重量={feat.get('weight_kg')}  "
+                  f"レップ(IMU/骨格/申告)={feat.get('imu_n_reps_detected', '-')}/"
+                  f"{feat.get('pose_n_reps_detected', '-')}/{feat.get('reps_completed')}  "
+                  f"MCV(IMU)={feat.get('imu_first_rep_mcv_mps', '-')}  "
+                  f"MCV(骨格,BL/s)={feat.get('pose_first_rep_mcv_bl', '-')}")
         except Exception as e:
             print(f"  [ERROR] {e}")
 
