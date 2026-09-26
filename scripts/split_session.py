@@ -20,8 +20,10 @@
 
  【特徴】
   ・セッションフォルダ直下に置いた動画を自動で見つけ、videos/setNN.mp4 に配置する
-  ・動画のファイル名から重量を推定する（130.mp4 → weight_kg = 130）
+  ・動画のファイル名から重量・回数を読む（130.mp4 / 130kg_3rep.mp4 → 130 kg, 3回）
+  ・--weights / --reps で重量・回数をまとめて入れられる（ファイル名が IMG_1234 などのとき）
   ・複数のセッションを1つにまとめられる（受信を何度も起動し直した場合に使う）
+  ・再実行しても、meta.json に手で入れた値（重量・回数・RPE・メモ）は残す
 
  【使い方】
   # 最新セッション1つを変換
@@ -39,6 +41,9 @@
   # 一部を除外してまとめる（フォルダ名の一部で指定）
   python split_session.py --subject S001 --session SES004 --all --skip 013048
 
+  # 重量・回数をまとめて入れる（セット順。個数はセット数と同じに）
+  python split_session.py --subject S001 --session SES005 --weights 100,110,120 --reps 5,3,2
+
  依存ライブラリ: pip install pandas
 =============================================================================
 """
@@ -51,6 +56,8 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+
+from ingest_remote import parse_label
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -111,13 +118,51 @@ def find_videos_in(session_dir: Path) -> list:
     return sorted(vids, key=lambda p: p.name)
 
 
-def guess_weight(stem: str):
-    """ファイル名から重量を推定する。 130.mp4 → 130 ／ sq_135rpe9 → 135"""
-    for m in re.finditer(r"\d+", stem):
-        v = int(m.group())
+def guess_label(stem: str) -> dict:
+    """
+    動画のファイル名から重量・回数を読む。
+      130.mp4 → 130 kg ／ 130kg_3rep.mp4 → 130 kg, 3回 ／ IMG_0130.MOV → 読まない
+    """
+    lab = parse_label(stem)
+    if "weight_kg" not in lab and re.fullmatch(r"\d+(?:\.\d+)?", stem):
+        v = float(stem)
         if 20 <= v <= 400:          # バーベルとして現実的な範囲
-            return v
-    return None
+            lab["weight_kg"] = v
+    return lab
+
+
+def parse_list(text, cast, n_sets, name):
+    """--weights 100,110,120 のようなリストを読む（個数はセット数と一致させる）"""
+    if text is None:
+        return None
+    vals = [cast(x) for x in text.replace("、", ",").split(",") if x.strip()]
+    if len(vals) != n_sets:
+        sys.exit(f"[ERROR] --{name} の個数 {len(vals)} がセット数 {n_sets} と合いません")
+    return vals
+
+
+def merge_manual_edits(new_sets: list, old_meta_path: Path) -> list:
+    """既存の meta.json に手で入れた値を引き継ぐ（新しい値が空のとき、または RPE を直したとき）"""
+    if not old_meta_path.exists():
+        return new_sets
+    try:
+        old = json.loads(old_meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return new_sets
+    old_by_no = {int(s.get("set_no", -1)): s for s in old.get("sets", [])}
+    for s in new_sets:
+        o = old_by_no.get(s["set_no"])
+        if not o:
+            continue
+        for key in ("weight_kg", "reps_planned", "reps_completed", "rest_before_sec", "notes"):
+            if s.get(key) in (None, "") and o.get(key) not in (None, ""):
+                s[key] = o[key]
+        # RPE は meta.json を手で直した値（8.5 など）を優先する
+        if o.get("rpe") is not None and o.get("rpe") != s.get("rpe"):
+            print(f"     set{s['set_no']:02d}: RPE は meta.json の値 {o['rpe']} を残します"
+                  f"（markers.csv は {s.get('rpe')}）")
+            s["rpe"] = o["rpe"]
+    return new_sets
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +185,12 @@ def main():
     ap.add_argument("--date", type=str, default=None)
     ap.add_argument("--move-video", action="store_true",
                     help="動画をコピーではなく移動する")
+    ap.add_argument("--weights", type=str, default=None,
+                    help="セット順の重量 [kg]（例: 100,110,120）")
+    ap.add_argument("--reps", type=str, default=None,
+                    help="セット順の完了回数（例: 5,3,2）")
+    ap.add_argument("--view", type=str, default="front", choices=["front", "side", "oblique"],
+                    help="撮影方向（既定: front）")
     args = ap.parse_args()
 
     srcs = resolve_sources(args)
@@ -201,8 +252,11 @@ def main():
         print(f"  == {src.name}  ({len(raws)} devices, {n_sets_here} sets, "
               f"{len(videos)} videos)")
 
+        prev_end = None
         for i, (_, m) in enumerate(markers.iterrows()):
             set_no += 1
+            rest = round(float(m["start_s"]) - prev_end, 1) if prev_end is not None else None
+            prev_end = float(m["end_s"])
             t0 = float(m["start_s"]) - args.margin
             t1 = float(m["end_s"]) + args.margin
 
@@ -220,6 +274,7 @@ def main():
             # --- 動画の配置 ---
             video_name = None
             weight = None
+            reps = None
             if i < len(videos):
                 srcv = videos[i]
                 video_name = f"set{set_no:02d}{srcv.suffix.lower()}"
@@ -228,7 +283,9 @@ def main():
                     shutil.move(str(srcv), str(dstv))
                 else:
                     shutil.copy2(str(srcv), str(dstv))
-                weight = guess_weight(srcv.stem)
+                lab = guess_label(srcv.stem)
+                weight = lab.get("weight_kg")
+                reps = lab.get("reps")
 
             # --- RPE ---
             rpe = m.get("rpe")
@@ -236,14 +293,14 @@ def main():
 
             sets_meta.append({
                 "set_no": set_no,
-                "csv_filename": f"set{set_no:02d}_BAR.csv",
+                "csv_filename": f"set{set_no:02d}_{'BAR' if 'BAR' in raws else sorted(raws)[0]}.csv",
                 "video_filename": video_name,
                 "exercise": args.exercise,
                 "weight_kg": weight,
                 "reps_planned": None,
-                "reps_completed": None,
+                "reps_completed": reps,
                 "rpe": rpe_val,
-                "rest_before_sec": None,
+                "rest_before_sec": rest,
                 "duration_s": float(m["duration_s"]),
                 "source_session": src.name,
                 "notes": "",
@@ -258,6 +315,16 @@ def main():
     if not sets_meta:
         sys.exit("\n[ERROR] 変換できるセットがありませんでした。")
 
+    # --- 手入力の値を引き継ぎ、コマンドラインの指定で上書き ---
+    sets_meta = merge_manual_edits(sets_meta, out_dir / "meta.json")
+    weights = parse_list(args.weights, float, len(sets_meta), "weights")
+    reps_list = parse_list(args.reps, int, len(sets_meta), "reps")
+    for k, s in enumerate(sets_meta):
+        if weights:
+            s["weight_kg"] = weights[k]
+        if reps_list:
+            s["reps_completed"] = reps_list[k]
+
     # --- meta.json ---
     meta = {
         "session_id": args.session,
@@ -266,6 +333,8 @@ def main():
         "source_sessions": [s.name for s in srcs],
         "devices": sorted(all_devices),
         "sampling_hz": 100,
+        "modality": "imu+video",
+        "camera_view": args.view,
         "exercise": args.exercise,
         "notes": "",
         "sets": sets_meta,
@@ -276,6 +345,7 @@ def main():
     # --- サマリ ---
     n_vid = sum(1 for s in sets_meta if s["video_filename"])
     n_w   = sum(1 for s in sets_meta if s["weight_kg"])
+    n_r   = sum(1 for s in sets_meta if s["reps_completed"])
     n_rpe = sum(1 for s in sets_meta if s["rpe"] is not None)
 
     print()
@@ -284,17 +354,19 @@ def main():
     print(f"     セット     : {len(sets_meta)}")
     print(f"     IMU CSV    : {len(list(imu_dir.glob('*.csv')))} ファイル")
     print(f"     動画       : {n_vid} / {len(sets_meta)}")
-    print(f"     重量判定   : {n_w} / {len(sets_meta)}  （動画名から自動推定）")
+    print(f"     重量       : {n_w} / {len(sets_meta)}")
+    print(f"     回数       : {n_r} / {len(sets_meta)}")
     print(f"     RPE        : {n_rpe} / {len(sets_meta)}")
     print()
     print("  次にやること:")
-    if n_w < len(sets_meta):
-        print(f"   1. meta.json の weight_kg（null の箇所）を埋める")
+    if n_w < len(sets_meta) or n_r < len(sets_meta):
+        print(f"   1. 重量・回数を入れる（推測では埋めない）:")
+        print(f"      python scripts\\split_session.py --subject {args.subject} --session {args.session} "
+              f"... --weights 100,110,... --reps 5,3,...")
+        print(f"      （または meta.json を直接編集。再実行しても手入力の値は残ります）")
+        print(f"   2. python scripts\\run_pipeline.py --subject {args.subject}")
     else:
-        print(f"   1. meta.json の reps_completed を埋める（重量は自動で入っています）")
-    print(f"   2. python scripts\\pose_extract_yolo.py --subject {args.subject}")
-    print(f"   3. python scripts\\extract_features.py --subject {args.subject}")
-    print(f"   4. python scripts\\aggregate_features.py")
+        print(f"   1. python scripts\\run_pipeline.py --subject {args.subject}")
     print("=" * 64)
 
 
