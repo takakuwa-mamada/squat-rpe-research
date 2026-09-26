@@ -61,6 +61,8 @@ def main():
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 d = json.load(f)
+            # "_" で始まるキーはレップごとの詳細（リスト）なので CSV に入れない
+            d = {k: v for k, v in d.items() if not k.startswith("_")}
             d["_source"] = str(fp.relative_to(DATA_ROOT))
             rows.append(d)
         except Exception as e:
@@ -69,8 +71,8 @@ def main():
     df = pd.DataFrame(rows)
     # 並び順を整える: メタ → IMU → Pose
     meta_cols = [
-        "subject_id", "session_id", "date", "set_no",
-        "exercise", "weight_kg", "reps_planned", "reps_completed",
+        "subject_id", "session_id", "date", "set_no", "modality", "camera_view",
+        "exercise", "weight_kg", "pct_1rm", "reps_planned", "reps_completed",
         "rpe", "rest_before_sec", "set_notes",
     ]
     imu_cols  = sorted([c for c in df.columns if c.startswith("imu_")])
