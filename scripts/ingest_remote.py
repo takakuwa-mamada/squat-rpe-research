@@ -32,6 +32,8 @@
    python scripts\\ingest_remote.py              # 未取り込みの日付フォルダをすべて取り込む
    python scripts\\ingest_remote.py --dry-run    # 何をするかだけ表示（コピーしない）
    python scripts\\ingest_remote.py --force      # 取り込み済みも作り直す（同じ SES 番号を使う）
+   python scripts\\ingest_remote.py --src "G:\\マイドライブ\\スクワット研究"
+                                                 # Google Drive for desktop の共有フォルダから直接
    → 続けて python scripts\\run_pipeline.py
 
  依存: ffprobe（撮影日時の取得。無ければファイル名順になる）
@@ -354,15 +356,20 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="何をするかだけ表示する")
     ap.add_argument("--force", action="store_true", help="取り込み済みの日付フォルダも作り直す")
     ap.add_argument("--person", type=str, default=None, help="この協力者フォルダだけ")
+    ap.add_argument("--src", type=str, default=None,
+                    help="協力者フォルダが並んでいる場所（既定: data/_remote）")
     args = ap.parse_args()
 
-    if not REMOTE_ROOT.is_dir():
-        REMOTE_ROOT.mkdir(parents=True, exist_ok=True)
-        print(f"[INFO] {REMOTE_ROOT} を作りました。協力者の共有フォルダをここに置いてください。")
+    remote_root = Path(args.src).expanduser().resolve() if args.src else REMOTE_ROOT
+    if args.src and not remote_root.is_dir():
+        sys.exit(f"[ERROR] フォルダがありません: {remote_root}")
+    if not remote_root.is_dir():
+        remote_root.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] {remote_root} を作りました。協力者の共有フォルダをここに置いてください。")
 
     subs = load_subjects()
     n_new = 0
-    for person_dir in sorted(p for p in REMOTE_ROOT.iterdir() if p.is_dir()):
+    for person_dir in sorted(p for p in remote_root.iterdir() if p.is_dir()):
         person = person_dir.name
         if args.person and person != args.person:
             continue
