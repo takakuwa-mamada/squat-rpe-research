@@ -1,0 +1,345 @@
+<title>スクワット撮影ガイド</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=Dela+Gothic+One&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+  :root {
+    --ink: #1c2328;
+    --ink-soft: #505a61;
+    --paper: #f4f6f5;
+    --card: #ffffff;
+    --line: #d7dcdd;
+    --accent: #1f4e9c;          /* 20 kg プレートの青 */
+    --accent-soft: #e3ebf7;
+    --warn: #b3261e;
+    --warn-soft: #fbe9e7;
+    --code-bg: #eceff0;
+    --diagram-fill: #ffffff;
+    --cone: rgba(31, 78, 156, 0.10);
+    --display: "Dela Gothic One", "Hiragino Sans", "Yu Gothic", sans-serif;
+    --body: "BIZ UDPGothic", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ink: #e7ecee;
+      --ink-soft: #a9b3b8;
+      --paper: #13181b;
+      --card: #1b2226;
+      --line: #313b40;
+      --accent: #7fa6e8;
+      --accent-soft: #1d2a40;
+      --warn: #f2998f;
+      --warn-soft: #3a1f1c;
+      --code-bg: #232c31;
+      --diagram-fill: #1b2226;
+      --cone: rgba(127, 166, 232, 0.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ink: #e7ecee;
+    --ink-soft: #a9b3b8;
+    --paper: #13181b;
+    --card: #1b2226;
+    --line: #313b40;
+    --accent: #7fa6e8;
+    --accent-soft: #1d2a40;
+    --warn: #f2998f;
+    --warn-soft: #3a1f1c;
+    --code-bg: #232c31;
+    --diagram-fill: #1b2226;
+    --cone: rgba(127, 166, 232, 0.14);
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.75;
+    padding-inline: 16px;
+    padding-block: 28px 56px;
+  }
+  .wrap { max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; gap: 36px; }
+
+  header { display: flex; flex-direction: column; gap: 12px; }
+  .eyebrow { font-size: 12px; letter-spacing: 0.12em; color: var(--ink-soft); font-weight: 700; }
+  h1 {
+    font-family: var(--display);
+    font-weight: 400;
+    font-size: clamp(30px, 8vw, 40px);
+    line-height: 1.25;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .lead { margin: 0; color: var(--ink-soft); }
+  .lead strong { color: var(--ink); }
+
+  .rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .rule {
+    background: var(--accent-soft);
+    border-radius: 10px;
+    padding: 12px 8px;
+    text-align: center;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .rule b { font-family: var(--display); font-weight: 400; font-size: 20px; color: var(--accent); line-height: 1.3; }
+  .rule span { font-size: 12px; color: var(--ink-soft); line-height: 1.4; }
+
+  section { display: flex; flex-direction: column; gap: 14px; }
+  h2 {
+    font-size: 20px;
+    margin: 0;
+    display: flex; align-items: baseline; gap: 10px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--ink);
+    text-wrap: balance;
+  }
+  h2 .no { font-family: var(--display); font-weight: 400; color: var(--accent); font-size: 22px; font-variant-numeric: tabular-nums; }
+  h2 .when { margin-left: auto; font-size: 12px; font-weight: 700; color: var(--ink-soft); letter-spacing: 0.06em; }
+  p { margin: 0; }
+  .note { font-size: 14px; color: var(--ink-soft); }
+
+  .spec { margin: 0; display: grid; grid-template-columns: auto 1fr; border-top: 1px solid var(--line); }
+  .spec dt, .spec dd { margin: 0; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .spec dt { font-weight: 700; padding-right: 16px; color: var(--ink-soft); font-size: 14px; white-space: nowrap; }
+  .spec dd strong { color: var(--accent); }
+
+  figure { margin: 0; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { font-size: 13px; color: var(--ink-soft); text-align: center; margin-top: 6px; }
+  .d-line { stroke: var(--ink); fill: none; }
+  .d-fill { fill: var(--diagram-fill); stroke: var(--ink); }
+  .d-ink { fill: var(--ink); }
+  .d-accent { fill: var(--accent); }
+  .d-accent-line { stroke: var(--accent); fill: none; }
+  .d-cone { fill: var(--cone); stroke: none; }
+  .d-text { fill: var(--ink); font-family: var(--body); font-size: 12px; }
+  .d-text-soft { fill: var(--ink-soft); font-family: var(--body); font-size: 11px; }
+  .d-text-accent { fill: var(--accent); font-family: var(--body); font-size: 12px; font-weight: 700; }
+
+  .flow { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .flow li { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 14px; }
+  .flow li.arrow { border: none; background: none; padding: 0 2px; color: var(--ink-soft); }
+  .flow li.key { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+
+  .ng { background: var(--warn-soft); color: var(--ink); border-radius: 10px; padding: 12px 14px; font-size: 14px; }
+  .ng b { color: var(--warn); }
+
+  ul.plain { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }
+
+  .rpe { width: 100%; border-collapse: collapse; }
+  .rpe td { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  .rpe td:first-child { width: 64px; padding-left: 0; }
+  .chip {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 48px; height: 32px; border-radius: 6px;
+    font-family: var(--display); font-size: 18px; font-variant-numeric: tabular-nums;
+  }
+  .p25 { background: #c8102e; color: #fff; }
+  .p20 { background: #1f4e9c; color: #fff; }
+  .p15 { background: #f2c400; color: #1c2328; }
+  .p10 { background: #2e7d32; color: #fff; }
+  .p5  { background: #f4f4f2; color: #1c2328; box-shadow: inset 0 0 0 1px #c9cfd1; }
+
+  .snippet { display: flex; flex-direction: column; gap: 6px; }
+  .snippet-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .snippet-head span { font-weight: 700; font-size: 14px; }
+  pre {
+    margin: 0; background: var(--code-bg); border-radius: 8px; padding: 12px 14px;
+    font-family: var(--mono); font-size: 14px; line-height: 1.6; overflow-x: auto; white-space: pre;
+  }
+  code { font-family: var(--mono); font-size: 0.92em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  button.copy {
+    font-family: var(--body); font-size: 13px; font-weight: 700;
+    color: var(--accent); background: transparent;
+    border: 1px solid var(--accent); border-radius: 999px; padding: 4px 12px; cursor: pointer;
+  }
+  button.copy:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  .or { display: grid; gap: 16px; }
+  .or-label { font-family: var(--display); color: var(--accent); font-size: 18px; }
+
+  footer { border-top: 1px solid var(--line); padding-top: 18px; font-size: 14px; color: var(--ink-soft); display: flex; flex-direction: column; gap: 6px; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    button.copy { transition: background 0.15s, color 0.15s; }
+  }
+  button.copy.done { background: var(--accent); color: var(--card); }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">研究協力のお願い ・ バックスクワット</div>
+    <h1>スクワット撮影ガイド</h1>
+    <p class="lead">スマホの動画から、スクワットの「きつさ（RPE）」を推定する研究です。
+      <strong>いつものメインセットを撮って送るだけ</strong>。1回あたり +5 分くらいです。</p>
+    <div class="rules" aria-label="守ってほしい3つ">
+      <div class="rule"><b>正面</b><span>バーベルの真正面</span></div>
+      <div class="rule"><b>全身</b><span>頭から足先まで</span></div>
+      <div class="rule"><b>1セット1本</b><span>ラックから出て戻るまで</span></div>
+    </div>
+  </header>
+
+  <section id="first">
+    <h2><span class="no">1</span>プロフィールを置く<span class="when">初回だけ</span></h2>
+    <p>共有フォルダ（Google Drive）の<strong>自分の名前のフォルダ</strong>に <code>プロフィール.txt</code> を作って、この4行を書いてください。</p>
+    <div class="snippet">
+      <div class="snippet-head"><span>プロフィール.txt</span><button class="copy" type="button" data-target="snip-profile">コピー</button></div>
+      <pre id="snip-profile">身長 175
+体重 80
+1RM 150
+歴 5</pre>
+    </div>
+    <p class="note">1RM はスクワットの最大重量（kg、推定でOK）。歴はトレーニング歴（年）。</p>
+  </section>
+
+  <section id="film">
+    <h2><span class="no">2</span>撮り方<span class="when">毎回同じに</span></h2>
+    <figure>
+      <svg viewBox="0 0 340 300" role="img" aria-label="上から見たカメラの位置。ラックの正面、2.5〜3メートル離れた所にスマホを置く">
+        <!-- 画角 -->
+        <polygon class="d-cone" points="170,238 40,22 300,22"/>
+        <!-- ラックの支柱 -->
+        <rect class="d-fill" x="100" y="30" width="14" height="14" stroke-width="1.5"/>
+        <rect class="d-fill" x="226" y="30" width="14" height="14" stroke-width="1.5"/>
+        <text class="d-text-soft" x="84" y="24" text-anchor="middle">ラック</text>
+        <!-- バーベル -->
+        <line class="d-line" x1="66" y1="62" x2="274" y2="62" stroke-width="3"/>
+        <rect class="d-accent" x="72" y="50" width="8" height="24" rx="1.5"/>
+        <rect class="d-accent" x="260" y="50" width="8" height="24" rx="1.5"/>
+        <!-- 挙上者（上から見た頭と肩） -->
+        <ellipse class="d-fill" cx="170" cy="64" rx="30" ry="11" stroke-width="1.5"/>
+        <circle class="d-fill" cx="170" cy="64" r="10" stroke-width="1.5"/>
+        <text class="d-text" x="170" y="96" text-anchor="middle">自分（正面を向く）</text>
+        <!-- 距離 -->
+        <line class="d-accent-line" x1="310" y1="64" x2="310" y2="250" stroke-width="1.5"/>
+        <line class="d-accent-line" x1="303" y1="64" x2="317" y2="64" stroke-width="1.5"/>
+        <line class="d-accent-line" x1="303" y1="250" x2="317" y2="250" stroke-width="1.5"/>
+        <text class="d-text-accent" x="302" y="160" text-anchor="end">2.5〜3 m</text>
+        <!-- スマホ（縦向き・三脚） -->
+        <rect class="d-fill" x="160" y="238" width="20" height="34" rx="4" stroke-width="1.5"/>
+        <circle class="d-ink" cx="170" cy="243" r="2"/>
+        <line class="d-line" x1="170" y1="272" x2="156" y2="290" stroke-width="1.5"/>
+        <line class="d-line" x1="170" y1="272" x2="184" y2="290" stroke-width="1.5"/>
+        <text class="d-text" x="192" y="252">スマホ</text>
+        <text class="d-text-soft" x="192" y="268">縦向き・腰の高さ・三脚</text>
+      </svg>
+      <figcaption>上から見た図。ラックの支柱の間から、自分の真正面を撮る</figcaption>
+    </figure>
+    <dl class="spec">
+      <dt>向き</dt><dd><strong>正面</strong>（バーベルの真正面から）</dd>
+      <dt>距離</dt><dd><strong>2.5〜3 m</strong></dd>
+      <dt>高さ</dt><dd>スマホを<strong>腰の高さ</strong>に、<strong>縦向き</strong>で</dd>
+      <dt>画角</dt><dd><strong>頭から足先まで全身</strong>。しゃがんだときも、ラックから出るときも切れないように</dd>
+      <dt>固定</dt><dd>三脚か台に立てかける</dd>
+      <dt>周り</dt><dd>自分の前を人が横切らない位置</dd>
+      <dt>画質</dt><dd>スマホの標準設定のままでOK</dd>
+    </dl>
+    <p><strong>1セット = 動画1本</strong></p>
+    <ol class="flow" aria-label="1セットの撮り方">
+      <li class="key">録画開始</li><li class="arrow" aria-hidden="true">→</li>
+      <li>ラックから外す</li><li class="arrow" aria-hidden="true">→</li>
+      <li>挙げる</li><li class="arrow" aria-hidden="true">→</li>
+      <li>ラックに戻す</li><li class="arrow" aria-hidden="true">→</li>
+      <li class="key">録画停止</li>
+    </ol>
+    <div class="ng"><b>NG</b>　手持ち撮影／足先が切れている／斜めや真横から</div>
+  </section>
+
+  <section id="sets">
+    <h2><span class="no">3</span>撮るセット</h2>
+    <ul class="plain">
+      <li><strong>メインセットは全部</strong>（アップは撮らなくてOK）</li>
+      <li><strong>3〜8回のセット</strong>だと特にうれしい</li>
+      <li>きつさがいろいろ混ざると最高です（RPE 6〜10）。<strong>毎回限界までやる必要はありません。安全第一で</strong></li>
+    </ul>
+  </section>
+
+  <section id="rpe">
+    <h2><span class="no">4</span>RPE の付け方</h2>
+    <p><strong>セットが終わったら 15 秒以内に決めて、後から変えない</strong>でください。</p>
+    <table class="rpe">
+      <tbody>
+        <tr><td><span class="chip p25">10</span></td><td>もう1回も無理（限界）</td></tr>
+        <tr><td><span class="chip p20">9</span></td><td>あと1回できた</td></tr>
+        <tr><td><span class="chip p15">8</span></td><td>あと2回できた</td></tr>
+        <tr><td><span class="chip p10">7</span></td><td>あと3回できた</td></tr>
+        <tr><td><span class="chip p5">6</span></td><td>あと4回以上できた</td></tr>
+      </tbody>
+    </table>
+    <p class="note">9.5・8.5 などの中間もOK。途中で潰れたセットは、<strong>挙がった回数</strong>を書いて RPE 10。</p>
+  </section>
+
+  <section id="send">
+    <h2><span class="no">5</span>送り方</h2>
+    <p>共有フォルダの自分のフォルダに<strong>日付のフォルダ</strong>（例 <code>20261005</code>）を作り、その日の動画を入れてください。</p>
+    <div class="ng"><b>Google Drive アプリからアップロード</b>してください。LINE で送ると画質と撮影時刻が消えてしまいます。</div>
+    <p>重量・回数・RPE は <strong>A か B のどちらか</strong>で教えてください。</p>
+    <div class="or">
+      <div class="snippet">
+        <div class="or-label">A　ファイル名を変える</div>
+        <div class="snippet-head"><span>重量kg_回数rep_RPE値</span><button class="copy" type="button" data-target="snip-name">コピー</button></div>
+        <pre id="snip-name">100kg_5rep_RPE8</pre>
+        <p class="note">例: <code>102.5kg_3rep_RPE9.5.mov</code></p>
+      </div>
+      <div class="snippet">
+        <div class="or-label">B　メモを置く</div>
+        <p class="note">ファイル名はそのままでOK。日付フォルダに <code>記録.txt</code> を作り、<strong>撮った順に1行1セット</strong>で「重量 回数 RPE」。</p>
+        <div class="snippet-head"><span>記録.txt</span><button class="copy" type="button" data-target="snip-log">コピー</button></div>
+        <pre id="snip-log">100 5 8
+102.5 3 9.5
+105 2 9</pre>
+      </div>
+    </div>
+    <div class="snippet">
+      <div class="snippet-head"><span>フォルダの例</span></div>
+      <pre>スクワット研究/
+└─ 自分の名前/
+    ├─ プロフィール.txt
+    ├─ 20261005/
+    │   ├─ IMG_1234.MOV
+    │   ├─ IMG_1235.MOV
+    │   └─ 記録.txt
+    └─ 20261008/
+        ├─ 100kg_5rep_RPE8.mp4
+        └─ 105kg_3rep_RPE9.mp4</pre>
+    </div>
+  </section>
+
+  <footer>
+    <p>動画は研究のためだけに使い、外部には公開しません（骨格の座標データに変換して解析します）。</p>
+    <p>わからないことは LINE で気軽に聞いてください。ご協力ありがとうございます！</p>
+  </footer>
+</div>
+
+<script>
+  document.querySelectorAll("button.copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var el = document.getElementById(btn.dataset.target);
+      if (!el) return;
+      var text = el.textContent;
+      function done() {
+        btn.textContent = "コピーしました";
+        btn.classList.add("done");
+        setTimeout(function () { btn.textContent = "コピー"; btn.classList.remove("done"); }, 1600);
+      }
+      function selectFallback() {
+        var r = document.createRange();
+        r.selectNodeContents(el);
+        var s = window.getSelection();
+        s.removeAllRanges();
+        s.addRange(r);
+        btn.textContent = "選択しました";
+        setTimeout(function () { btn.textContent = "コピー"; }, 1600);
+      }
+      try {
+        navigator.clipboard.writeText(text).then(done, selectFallback);
+      } catch (e) {
+        selectFallback();
+      }
+    });
+  });
+</script>

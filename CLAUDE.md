@@ -138,7 +138,7 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 9. `mediapipe==0.10.14` 固定（比較用のみ）。OpenH264 の警告は無害。
 10. OneDrive 同期フォルダ内。大きいファイルの同期中はロックされることがある。
 11. `docs/研究計画書.pdf` はパスワード保護。本文は `docs/研究計画書_source.js`。
-12. `docs/計測チェックリスト.docx/.pdf` は旧方針（側面撮影・プレート基準・古いコマンド）のまま。ジムでは `docs/チートシート.txt` を使う。
+12. `docs/計測チェックリスト.docx/.pdf` は 2026-09-27 に正面撮影版へ作り直した（生成: `node docs\計測チェックリスト_source.js`、docx は npm で別途）。旧版は `_archive/計測チェックリスト_旧_側面撮影.*`。
 13. Bash ツールのヒアドキュメントで `\n` などのバックスラッシュが潰れることがある → 置換スクリプトはファイルに書いてから実行する。
 
 ## 8. 次にやること（優先順）
@@ -167,6 +167,7 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 - 終了: q → mean Hz 90〜100、セット数、RPE 未入力なしを確認。
 - メニュー: A ヘビー / B ミディアム / C ボリューム（`docs/スクワット計測メニュー.xlsx`）。後半はわざと重量を下げても RPE が上がる構成。
 - 協力者: `docs/協力者向け撮影ガイド.md`（正面・1セット1本・ファイル名 `100kg_5rep_RPE8` か `記録.txt`・Google Drive で送る）。
+  スマホ用ページ: https://claude.ai/artifact/LHkdc4JZxy8qCGsv7iBVBU（元ファイル `docs/協力者向け撮影ガイド.html`。内容を変えたら .md と両方直して、Artifact の url 指定で再公開）。
 
 ## 10. やってはいけないこと
 
