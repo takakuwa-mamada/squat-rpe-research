@@ -26,6 +26,7 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
   「成果物・Evidence > Commits」に載せるので、作業は意味のある単位でコミットする。振り返り（感想）欄はユーザーが自分で書く。
   下書きは `/weekly-issue`。
 - カスタムコマンド `/process-session`・`/weekly-issue` の定義は `docs/claude_commands/`（`.claude/commands/` にコピー済み。直したら両方）。
+  週報は `/weekly-issue` で一から書く（雛形 `docs/claude_commands/weekly_issue_template.md`。ユーザーはテンプレートを貼らなくてよい）。
 - 役割分担: コード・データ処理・解析は Claude Code。Word/PowerPoint/Excel の資料作成（研究計画書・ポスター・スライド・計測メニュー）は
   これまで Cowork 側で作ってきた（`*_source.js` は docx-js / pptxgenjs の生成スクリプト）。
 
