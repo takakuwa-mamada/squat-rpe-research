@@ -297,6 +297,8 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
         "imu_n_samples":              int(n),
         "imu_fs_hz":                  round(fs, 2),
         "imu_gravity_ref_g":          round(g_ref, 4),
+        # M5 の向きの確認用（画面が真上なら +1 g 前後）
+        "imu_az_median_g":            round(float(np.median(imu_df["az_g"])), 3),
         "imu_total_time_s":           round(total_time, 3),
         "imu_concentric_time_s":      round(concentric_time, 3),
         "imu_eccentric_time_s":       round(eccentric_time, 3),
@@ -493,6 +495,9 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
     # 体の大きさ: 立位の肩〜足首の高さ（ピクセル）= 1 BL
     body_len = _nanstat(lambda a: np.percentile(a, 95), an_y - sh_y)
     quality["pose_body_len_px"] = _r(body_len, 1)
+    # 肩幅 / 体の高さ: 正面なら 0.2 以上、真横なら 0.1 未満になる（撮影方向の確認用）
+    quality["pose_shoulder_width_bl"] = _r(_nanstat(np.median, np.abs(lsx - rsx)) / body_len
+                                           if body_len and not np.isnan(body_len) else np.nan, 3)
     if np.isnan(body_len) or body_len < 50:
         d = _pose_empty("body too small or not detected", n)
         d.update(quality)
