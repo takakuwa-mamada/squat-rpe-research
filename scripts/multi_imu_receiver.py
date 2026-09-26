@@ -12,6 +12,9 @@
   ・セッション全体を連続記録し、セットの区切りは「マーカー」で記録する。
     → 取りこぼしが起きない。セット分割は後処理で行う。
   ・デバイス間の時刻同期は PC 側の受信時刻 (recv_time_s) を基準とする。
+  ・PC の居場所を知らせる合図（ビーコン）を UDP 5006 に1秒ごとにブロードキャストする。
+    ファーム v4 はこれを受け取って送信先を自動で決めるので、テザリング等で
+    PC の IP が変わってもファームを書き直さなくてよい（--no-beacon で無効）。
 
  【受信フォーマット】
     DEVICE_ID,boot_ms,ax,ay,az,gx,gy,gz
@@ -68,6 +71,8 @@ PROJECT_ROOT = SCRIPT_DIR.parent if (SCRIPT_DIR.parent / "data").is_dir() else S
 # =========================== 設定 ===========================================
 UDP_IP        = "0.0.0.0"
 UDP_PORT      = 5005
+BEACON_PORT   = 5006        # PC の居場所を M5 に知らせる合図の送信先ポート
+BEACON_MSG    = b"SQUATPC"
 PLOT_WINDOW_S = 10.0        # プロットに表示する時間幅 [秒]
 EXPECTED_HZ   = 100         # 想定サンプリング周波数（統計表示用）
 
@@ -265,11 +270,55 @@ class Receiver(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
+# ビーコン（PC の居場所を M5 に知らせる）
+# ---------------------------------------------------------------------------
+def broadcast_addresses():
+    """ブロードキャスト先: 255.255.255.255 と、各ネットワークのブロードキャストアドレス"""
+    addrs = {"255.255.255.255"}
+    try:
+        import ipaddress
+        import psutil
+        for lst in psutil.net_if_addrs().values():
+            for a in lst:
+                if a.family == socket.AF_INET and a.netmask and not a.address.startswith(("127.", "169.254.")):
+                    net = ipaddress.IPv4Network(f"{a.address}/{a.netmask}", strict=False)
+                    addrs.add(str(net.broadcast_address))
+    except Exception:
+        pass
+    return sorted(addrs)
+
+
+class Beacon(threading.Thread):
+    """1秒ごとに "SQUATPC,<受信ポート>" をブロードキャストする（ファーム v4 が受け取る）"""
+    def __init__(self, data_port, stop_flag):
+        super().__init__(daemon=True)
+        self.msg = BEACON_MSG + f",{data_port}".encode()
+        self.stop_flag = stop_flag
+
+    def run(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        addrs, last_refresh = [], 0.0
+        while not self.stop_flag.is_set():
+            if time.time() - last_refresh > 10.0:          # ネットワークの切り替えに追従
+                addrs, last_refresh = broadcast_addresses(), time.time()
+            for addr in addrs:
+                try:
+                    sock.sendto(self.msg, (addr, BEACON_PORT))
+                except OSError:
+                    pass
+            self.stop_flag.wait(1.0)
+        sock.close()
+
+
+# ---------------------------------------------------------------------------
 # メイン
 # ---------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="Multi-IMU UDP receiver")
     ap.add_argument("--port", type=int, default=UDP_PORT)
+    ap.add_argument("--no-beacon", action="store_true",
+                    help="PC の居場所を知らせる合図を送らない（ファームの pc_ip 固定で使う）")
     ap.add_argument("--outdir", type=str,
                     default=str(PROJECT_ROOT / "data" / "_sessions"))
     args = ap.parse_args()
@@ -300,6 +349,9 @@ def main():
 
     rx = Receiver(recorder, buffers, buf_lock, args.port, stop_flag)
     rx.start()
+    if not args.no_beacon:
+        Beacon(args.port, stop_flag).start()
+        print(f"[BEACON] PC の居場所を UDP {BEACON_PORT} に送信中: {', '.join(broadcast_addresses())}")
 
     # ---------------- プロット ----------------
     fig, ax = plt.subplots(figsize=(12, 6))
