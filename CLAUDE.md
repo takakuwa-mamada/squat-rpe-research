@@ -20,7 +20,9 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
 - コマンドは Windows PowerShell 形式で、プロジェクトルートから `python scripts\xxx.py`。何をするコマンドか一言添える。
 - コードのコメント・docstring・print は日本語。既存スクリプトの書式（冒頭 docstring に使い方、`PROJECT_ROOT` 自動判定）に合わせる。
 - **ファイルは消さずに整理する**（ユーザー指示「削除ではなく、フォルダ内分けをして」）。不要物は `_archive/` へ移動。削除が必要なら先に確認。
-- 週報: 毎週 GitHub Issue（YokoyamaLab/Lab_Management の Weekly Research Progress、月曜 Plan／金曜 Result、金曜ゼミで発表）。
+- 週報: 毎週 GitHub Issue（YokoyamaLab/Lab_Management の Weekly Research Progress）。**ゼミで週2回発表する**:
+  **月曜 = 先週の振り返り＋今週の todo**（Issue の上半分: 持ち越し・今週の目標・成果物・活動・懸念）、
+  **金曜 = 今週の成果・反省・来週以降の方針**（Issue の下半分: 完了したこと・完了しなかったこと・変更・知見・Evidence・次週への課題）。
   「成果物・Evidence > Commits」に載せるので、作業は意味のある単位でコミットする。振り返り（感想）欄はユーザーが自分で書く。
   下書きは `/weekly-issue`。
 - カスタムコマンド `/process-session`・`/weekly-issue` の定義は `docs/claude_commands/`（`.claude/commands/` にコピー済み。直したら両方）。
