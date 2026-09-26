@@ -54,7 +54,7 @@ def find_latest_model(models_dir: Path, prefer: str = "random_forest") -> Path:
         sys.exit(f"[ERROR] no trained models in {models_dir}")
     latest = timestamps[-1]
     # 優先順位
-    for name in (prefer, "rf", "gb", "gradient_boosting", "linear"):
+    for name in ("best", prefer, "rf", "gb", "gradient_boosting", "linear"):
         cand = latest / f"{name}.pkl"
         if cand.exists():
             return cand
@@ -77,11 +77,12 @@ def predict_dataframe(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
     missing = [c for c in feature_cols if c not in df.columns]
     if missing:
         sys.exit(f"[ERROR] required features missing in input: {missing}")
-    valid = df[feature_cols].dropna()
+    # 学習時のモデルは欠損を補完できる（1レップのセットの変化量などは NaN のまま渡す）
+    valid = df[df[feature_cols].notna().any(axis=1)]
     if len(valid) == 0:
         sys.exit("[ERROR] all rows have NaN in required features")
 
-    preds = bundle["model"].predict(valid[feature_cols].to_numpy())
+    preds = bundle["model"].predict(valid[feature_cols].to_numpy(dtype=float))
     result = valid.copy()
     result["predicted_rpe"] = preds
     if "rpe" in df.columns:
@@ -99,9 +100,7 @@ def predict_single(bundle: dict, feat_json: dict) -> float:
     row = []
     for c in feature_cols:
         v = feat_json.get(c)
-        if v is None:
-            sys.exit(f"[ERROR] feature '{c}' missing or None in JSON")
-        row.append(float(v))
+        row.append(float("nan") if v is None else float(v))   # 欠損はモデル側で補完する
     pred = bundle["model"].predict(np.array([row]))[0]
     return float(pred)
 
