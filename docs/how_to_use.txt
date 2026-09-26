@@ -1,11 +1,14 @@
-# 1. セッションをセット単位に分割
-python split_session.py --subject S001 --session SES001
+使い方は docs\チートシート.txt を見る（詳細は CLAUDE.md §5）。
+すべてプロジェクトフォルダで実行する。
 
-# 2. 動画を data/S001/SES001/videos/ に set01.mp4 … として配置
+cd "C:\Users\129ka\OneDrive\ドキュメント\Claude\Projects\大学院研究"
 
-# 3. 骨格抽出
-python pose_extract_yolo.py --subject S001
+# 1. セッションをセット単位に分割（動画は _sessions\session_*\ 直下に置いておく）
+python scripts\split_session.py --subject S001 --session SES005 --all --skip <処理済みの部分名>
 
-# 4. 特徴量抽出
-python extract_features.py --subject S001
-python aggregate_features.py
+# 2. meta.json の weight_kg / reps_completed の null を埋める
+
+# 3. 骨格抽出 → 特徴量 → 集計
+python scripts\pose_extract_yolo.py --subject S001
+python scripts\extract_features.py --subject S001 --force
+python scripts\aggregate_features.py
