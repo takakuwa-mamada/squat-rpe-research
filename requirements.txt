@@ -1,5 +1,5 @@
 # スクワット RPE 推定研究の Python 依存ライブラリ
-# 実行実績: Windows 11 / Python 3.10（scripts/__pycache__ が cpython-310）
+# 実行実績: Windows 11 / Python 3.12（2026-09-27）
 # 入れ方: pip install -r requirements.txt
 # バージョンを固定したくなったら、動いている環境で pip freeze して書き換える
 
@@ -13,4 +13,6 @@ joblib
 opencv-python          # CSRT が無いと言われたら opencv-contrib-python に入れ替える
 ultralytics            # YOLO26 Pose（重みは weights/yolo26m-pose.pt）
 mediapipe==0.10.14     # 比較用の pose_extract.py。新しい版は solutions API が無いので固定
-pytest                 # scripts/test_bar_tracking.py
+pytest                 # scripts/test_pipeline.py, scripts/test_bar_tracking.py
+psutil                 # multi_imu_receiver.py のブロードキャスト先の計算（無くても 255.255.255.255 で動く）
+# 外部ツール: ffmpeg（ffprobe）… ingest_remote.py が動画の撮影日時を読む。無ければファイル名順になる
