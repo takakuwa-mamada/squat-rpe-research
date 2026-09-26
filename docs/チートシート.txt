@@ -1,60 +1,64 @@
 =============================================================
- スクワット計測 チートシート
+ スクワット計測 チートシート（正面撮影・1セット＝動画1本）
 =============================================================
 
-■ ジムで
+■ 出発前に1回だけ
 -------------------------------------------------------------
- 1. テザリングON → PC接続 → ipconfig でIP確認
- 2. M5電源ON   → WiFi:OK / DSTがPCのIPと一致 / SEND
- 3. python scripts\multi_imu_receiver.py
- 4. バー水平で az ≒ 1.0 を確認   ★ここ外すと全部無駄
- 5. 動画の録画を開始（セッション通して回しっぱなし）
+ firmware\m5stick_multi_sender\m5stick_multi_sender.ino（v4）の
+ WIFI_LIST にスマホのテザリングを追加（pc_ip は "" でOK）
+ → Arduino IDE で書き込み（M5Stick-C-Plus / COM3 / 1500000）
+
+
+■ ジムで（本人: IMU＋動画）
+-------------------------------------------------------------
+ 1. テザリングON → PC接続
+ 2. python scripts\multi_imu_receiver.py
+ 3. M5電源ON → 画面が「PC:xx.xx.xx.xx A」（緑）になればOK
+ 4. M5 をシャフト中央、画面が真上 → バー水平で az ≒ 1.0
+                                     ★ここ外すと全部無駄
+ 5. スマホ: 正面・2.5〜3 m・腰の高さ・縦向き・三脚
+            頭から足先まで全身（しゃがんでも切れない）
  6. 各セット:
-      SPACE → 挙上 → SPACE → RPEを声に出す → 数字キー
+      録画開始 → SPACE → ラックアウト→挙上→ラックイン → SPACE
+      → RPEを声に出す（画面を見る前）→ 数字キー → 録画停止
  7. q で終了 → mean Hz が 90〜100 か確認
 
  キー:  SPACE=セット区切り   6〜9=RPE   0=RPE10   5=RPE5
         u=直前を取消        q=終了
 
 
-■ 帰宅後
+■ 帰宅後（本人）
 -------------------------------------------------------------
  cd "C:\Users\129ka\OneDrive\ドキュメント\Claude\Projects\大学院研究"
 
- python scripts\split_session.py --subject S001 --session SES004
-   → data\S001\SES004\videos\ に set01.mp4 … を置く
-   → meta.json の weight_kg / reps を埋める
+ 動画をスマホから data\_sessions\session_…\ の直下へコピー
+ （撮影順 = セット順）
 
- python scripts\pose_extract_yolo.py --subject S001
- python scripts\extract_features.py  --subject S001
- python scripts\aggregate_features.py
+ python scripts\split_session.py --subject S001 --session SES005 --weights 100,110,120 --reps 5,3,2
+ python scripts\run_pipeline.py
+   → 最後の「品質レポート」で 要確認 が出たらそこを直す
 
- 30試技たまったら:
+
+■ 仲間の動画（Google Drive）
+-------------------------------------------------------------
+ python scripts\ingest_remote.py --src "G:\マイドライブ\スクワット研究"
+ python scripts\run_pipeline.py
+   → [要確認] が出た人には LINE で聞く（ラベル抜け・足元切れ など）
+
+
+■ データがたまったら
+-------------------------------------------------------------
  python scripts\train_rpe_model.py
-
-
-■ 確認ポイント
--------------------------------------------------------------
- mean Hz          90〜100
- peak_v           0.3〜1.5 m/s
- key_visibility   0.7 以上
- RPE ↑ のとき 速度 ↓ になっているか
-
-
-■ 近道（骨格だけ試す）
--------------------------------------------------------------
- 動画をセッションフォルダ直下に置いて
-
- python scripts\pose_extract_yolo.py --subject _sessions
-
- videos\ を作る必要なし。pose\ が自動でできる。
+   → models\<日時>\report.md に比較表・学習曲線・重要度
 
 
 ■ よくあるやつ
 -------------------------------------------------------------
- no videos found   → --subject は data\ 直下のフォルダ名
- データが来ない    → PCのIP変更 / ファイアウォール
- mean Hz < 50      → PCをラックに近づける
- rpe が空欄        → markers.csv に手で書く
+ PC: が黄色のまま     → 受信スクリプトが動いているか / ファイアウォールで Python を許可
+ mean Hz < 50         → PC をラックに近づける
+ 足元が切れている     → カメラを下げる or 離す
+ 正面から撮れていない → カメラをバーベルの真正面へ
+ RPE 8.5 にしたい     → meta.json を直接編集（split_session を再実行しても残る）
+ コードを直した       → python scripts\run_pipeline.py --force-features
 
 =============================================================
