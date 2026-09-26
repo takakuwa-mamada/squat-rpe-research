@@ -18,3 +18,9 @@ Thumbs.db
 
 # Contains real WiFi SSID/password + local IPs — do not commit as-is
 firmware/*/*.ino
+
+# 計測データ・派生データ（本人・協力者の個人データ。リポジトリは public なので入れない）
+data/*
+!data/README.txt
+outputs/
+models/

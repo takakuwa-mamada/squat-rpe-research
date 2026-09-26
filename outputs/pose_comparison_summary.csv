@@ -1,5 +1,0 @@
-stem,model,n_total,n_valid,nan_ratio,key_vis_mean,key_vis_min,abnormal_trunk_pct,abnormal_knee_l_pct,abnormal_knee_r_pct,huge_asymmetry_pct
-squat_RPE6,MediaPipe,142,142,0.0,0.9899,0.9838,0.0,0.0,0.0,5.63
-squat_RPE6,YOLO26,142,142,0.0,0.9939,0.9919,0.0,0.0,0.0,0.0
-sq_135rpe9.5,MediaPipe,155,148,0.0452,0.581,0.5116,0.0,0.0,0.0,4.05
-sq_135rpe9.5,YOLO26,155,155,0.0,0.8819,0.7272,0.0,0.0,0.0,0.0
