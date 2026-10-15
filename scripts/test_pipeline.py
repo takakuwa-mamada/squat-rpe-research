@@ -148,6 +148,47 @@ def test_imu_detects_reps_and_mcv_close_to_truth():
     assert abs(f["imu_gravity_ref_g"] - 1.05) < 0.01
 
 
+def make_imu_double_hump(fs=100.0, depths=(0.52, 0.55, 0.56), descent=1.0, ascent=1.4, rest=2.5,
+                         lead=20.0, g_bias=1.05):
+    """
+    上昇中の速度に山が2つあるレップ（切り返し直後に小さい山 → スティッキングポイントで減速 → 大きい山）。
+    2026-10-15 の実データ（SES005）では、この2つの山が別々のレップとして数えられ、
+    深いレップが2回入って、いちばん浅いレップが落ちた。それを再現するため1レップ目だけ少し浅くする。
+    """
+    s = np.linspace(0, 1, int(ascent * fs), endpoint=False)
+    v_shape = (0.35                                         # 谷でも上昇は続く（速度は正のまま）
+               + 0.55 * np.exp(-((s - 0.2) / 0.1) ** 2)     # 切り返し直後の山
+               + 1.00 * np.exp(-((s - 0.72) / 0.13) ** 2))  # スティッキングポイントを越えた後の山
+    v_shape *= np.sin(np.pi * s)                            # 始まりと終わりは速度 0
+    td = np.linspace(0, np.pi, int(descent * fs), endpoint=False)
+    segs = [np.zeros(int(lead * fs))]
+    for depth in depths:
+        up = np.cumsum(v_shape)
+        up = depth * up / up[-1]                            # 0 → depth まで上がる
+        segs += [depth * (1 - np.cos(td)) / 2, np.full(int(0.2 * fs), depth),
+                 depth - up, np.zeros(int(rest * fs))]
+    y = np.concatenate(segs + [np.zeros(int(3.0 * fs))])   # 立位からの下がり量 [m]
+    t = np.arange(len(y)) / fs
+    a_true = np.gradient(np.gradient(-y, 1 / fs), 1 / fs)
+    rng = np.random.default_rng(2)
+    az = g_bias + a_true / G + rng.normal(0, 0.01, len(t))
+    return pd.DataFrame({
+        "timestamp_ms": t * 1000.0,
+        "ax_g": rng.normal(0, 0.01, len(t)), "ay_g": rng.normal(0, 0.01, len(t)), "az_g": az,
+        "gx_dps": -3.8 + rng.normal(0, 1, len(t)), "gy_dps": -12.9 + rng.normal(0, 1, len(t)),
+        "gz_dps": 16.0 + rng.normal(0, 1, len(t)),
+    })
+
+
+def test_imu_double_hump_ascent_counts_each_rep_once():
+    imu = make_imu_double_hump()
+    f = ef.compute_imu_features(imu, expected_reps=3)
+    peaks = [r["peak_t_s"] for r in f["_imu_reps"]]
+    assert f["imu_n_reps_detected"] == 3
+    assert len(set(peaks)) == 3                            # 同じレップが2回入らない
+    assert min(np.diff(peaks)) > 2.5                       # 3つとも別のレップ（間隔 ≒ 5.1 s）
+
+
 def test_imu_single_rep_has_no_velocity_loss():
     imu, _, _ = make_imu(n_reps=1)
     f = ef.compute_imu_features(imu, expected_reps=1)

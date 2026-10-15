@@ -212,18 +212,30 @@ def imu_vertical_velocity(imu_df: pd.DataFrame, fs: float, dt: float):
     return a_vert, v, g_ref, v_raw, v_hp, [int(c) for c in centers]
 
 
+REP_GAP_OK_S = 6.0       # セット内のレップ間隔として普通の長さ [s]（これを超える間隔は減点）
+REP_GAP_PENALTY = 0.05   # 超えた 1 秒あたりの減点 [m]
+
+
 def select_reps(v_hp, fs, dt, expected_reps=None, min_rom=0.15):
     """
     おおまかな速度 v_hp からスクワットのレップを選ぶ。
     戻り値: [(下降の始まり, 下降のピーク, 上昇のピーク), ...]（時刻順）
 
-    「直前に下降がある上昇ピーク」のうち、上昇の変位（ROM）が min_rom [m] 以上のものだけを採用する。
-    ラックアウト・ラックイン・歩き出しは上下動が数 cm なので外れる。
-    レップ数が分かっていれば、ROM の大きい順に N 個残す（速度の大きい順だとラックインを拾う）。
+    1. 「直前に下降がある上昇ピーク」を候補にする。
+    2. 同じ上昇区間（速度が正の区間）に入るピークは1つにまとめる。
+       重いレップは上昇中の速度に山が2つできる（切り返し直後と、スティッキングポイントを越えた後）。
+       まとめないと同じレップが2回数えられ、本物のレップが押し出される（2026-10-15 の SES005 で発生）。
+    3. 下降と上昇の変位の小さい方（ROM）が min_rom [m] 以上のものだけ残す。
+       ラックアウト・ラックイン・歩き出しは上下動が数 cm なので外れる。
+       片側だけ大きいもの（ハイパスのドリフトで膨らんだ見かけの上下動）も外れやすい。
+    4. レップ数が分かっていて候補が多いときは、時刻が連続する N 個の組のうち
+       「ROM の合計 − 間隔が空きすぎた分の減点」が最大の組を選ぶ。
+       セットのレップは続けて行うので、離れた位置の候補（ラックアウト前後の動きなど）は選ばれにくい。
     """
     n = len(v_hp)
-    cands = []
+    by_seg = {}
     for pk in detect_reps(v_hp, fs, expected_reps=None):
+        pk = int(pk)
         lo = max(0, pk - int(3.0 * fs))
         dmin = lo + int(np.argmin(v_hp[lo:pk + 1]))
         ds = dmin
@@ -235,11 +247,28 @@ def select_reps(v_hp, fs, dt, expected_reps=None, min_rom=0.15):
         ze = pk
         while ze < n - 1 and v_hp[ze + 1] > 0:
             ze += 1
-        rom = float(np.sum(v_hp[zb:ze + 1]) * dt)
-        if rom >= min_rom:
-            cands.append((ds, dmin, int(pk), rom))
+        zd = zb - 1
+        while zd > 0 and v_hp[zd - 1] < 0:
+            zd -= 1
+        up = float(np.sum(v_hp[zb:ze + 1]) * dt)
+        down = float(-np.sum(v_hp[max(zd, 0):zb]) * dt)
+        key = (zb, ze)
+        # 同じ上昇区間のピークは、速度の高い方を代表にする（後で区間内の最大値を取り直す）
+        if key not in by_seg or v_hp[pk] > v_hp[by_seg[key][2]]:
+            by_seg[key] = (ds, dmin, pk, min(up, down))
+    cands = sorted(c for c in by_seg.values() if c[3] >= min_rom)
+
     if expected_reps and len(cands) > expected_reps:
-        cands = sorted(sorted(cands, key=lambda c: c[3], reverse=True)[:expected_reps])
+        N = int(expected_reps)
+        best, best_score = None, -np.inf
+        for i in range(len(cands) - N + 1):
+            group = cands[i:i + N]
+            gaps = [(group[k + 1][2] - group[k][2]) * dt for k in range(N - 1)]
+            score = (sum(c[3] for c in group)
+                     - REP_GAP_PENALTY * sum(max(0.0, g - REP_GAP_OK_S) for g in gaps))
+            if score > best_score:
+                best, best_score = group, score
+        cands = best
     return [(ds, dmin, pk) for ds, dmin, pk, _ in cands]
 
 
@@ -331,7 +360,11 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
         T, vc = solve_lockout(v_raw, a0, pk, fs, dt_med)
         v[a0:T + 1] = vc
         prev_T = T
-        peaks.append(int(dmin + np.argmax(v[dmin:T + 1])))
+        p_new = int(dmin + np.argmax(v[dmin:T + 1]))
+        # 同じレップを2回数えない（前のレップのピーク以前に戻るものは捨てる）
+        if peaks and p_new <= peaks[-1]:
+            continue
+        peaks.append(p_new)
     peaks = np.array(peaks, dtype=int)
 
     # 各種統計
