@@ -6,7 +6,7 @@
 
   最初に必ずこれを実行（作業フォルダへ移動）:
 
-      cd "C:\Users\129ka\OneDrive\ドキュメント\Claude\Projects\大学院研究"
+      cd C:\dev\claude\Projects\Research
 
   以降のコマンドは、このフォルダにいる前提で書いてある。
 
@@ -256,7 +256,7 @@
  まとめ（通常の流れ）
 ================================================================================
 
-  cd "C:\Users\129ka\OneDrive\ドキュメント\Claude\Projects\大学院研究"
+  cd C:\dev\claude\Projects\Research
 
   python scripts\split_session.py --subject S001 --session SES004
   （動画を data\S001\SES004\videos\ に set01.mp4 … で配置）

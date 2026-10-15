@@ -31,7 +31,7 @@
 
 ■ 帰宅後（本人）
 -------------------------------------------------------------
- cd "C:\Users\129ka\OneDrive\ドキュメント\Claude\Projects\大学院研究"
+ cd C:\dev\claude\Projects\Research
 
  動画をスマホから data\_sessions\session_…\ の直下へコピー
  （撮影順 = セット順）

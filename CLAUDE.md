@@ -3,7 +3,8 @@
 Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理由・関連研究・計測メニューの詳細は
 `docs/研究コンテキスト.md` にある。設計判断、論文・発表資料、実験計画に関わる作業の前には必ず読むこと。
 
-最終更新: 2026-10-15（9/18 の計測は別人物 → S002 に分離、本人の初データ S001/SES005、IMU レップ検出の修正、受信時に重量・回数を入力）
+最終更新: 2026-10-15（9/18 の計測は別人物 → S002 に分離、本人の初データ S001/SES005、IMU レップ検出の修正、受信時に重量・回数を入力、
+プロジェクトを OneDrive から `C:\dev\claude\Projects\Research` に移動、data/ を git 履歴から削除）
 （前回: 2026-09-27 方針転換: 汎用モデル先行・協力者6人は動画のみ・正面撮影）
 
 ---
@@ -74,7 +75,7 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
 ## 4. ディレクトリ
 
 ```
-大学院研究/
+C:\dev\claude\Projects\Research\   （2026-10-15 に OneDrive の「大学院研究」から移動）
 ├─ CLAUDE.md, README.md, requirements.txt, .gitignore
 ├─ cheat_sheet.txt           ユーザーが自分用に編集したチートシート（上書きしない）
 ├─ scripts/                  Python 一式（すべてプロジェクトルートから実行）
@@ -153,7 +154,8 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 7. 協力者の動画は **LINE 経由だと撮影日時が消える** → 撮影順がファイル名順になる（ガイドで Google Drive を指定済み）。
 8. バッテリー 120 mAh は Wi-Fi 常時送信で 30〜60 分。
 9. `mediapipe==0.10.14` 固定（比較用のみ）。OpenH264 の警告は無害。
-10. OneDrive 同期フォルダ内。大きいファイルの同期中はロックされることがある。
+10. 2026-10-15 に OneDrive の外（`C:\dev\claude\Projects\Research`、ASCII のパス）へ移動した。OneDrive のロック問題は無くなったが、
+    **`data/` は git にも OneDrive にも入っていない（このPCにしか無い）**。計測データと動画は別にバックアップする（外付けドライブ・クラウドなど）。
 11. `docs/研究計画書.pdf` はパスワード保護。本文は `docs/研究計画書_source.js`。
 12. `docs/計測チェックリスト.docx/.pdf` は 2026-09-27 に正面撮影版へ作り直した（生成: `node docs\計測チェックリスト_source.js`、docx は npm で別途）。旧版は `_archive/計測チェックリスト_旧_側面撮影.*`。
 13. Bash ツールのヒアドキュメントで `\n` などのバックスラッシュが潰れることがある → 置換スクリプトはファイルに書いてから実行する。
@@ -191,8 +193,9 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 - `firmware/*/*.ino` には実際の Wi-Fi SSID・パスワード・IP が入っている。内容をドキュメント・Issue・コミットメッセージ・チャットに転記しない。コミットしない（.gitignore 済み）。
   編集するときも WIFI_LIST の行は表示しない（grep で除外する）。コミット前に `git ls-files firmware` で追跡されていないことを確認する。
 - **`data/`・`outputs/`・`models/` はコミットしない**（.gitignore 済み。リポジトリは public）。動画（`*.mp4`）と重み（`weights/*.pt`）も同様。
-  過去のコミット（〜d458d7b 以前）には 9/18 の計測データ（当時の S001/SES004 と `_sessions/session_20260918_*` の IMU・骨格キーポイント・meta。動画は無し）が残っている。
-  **これは本人ではなく S002 のデータ**（2026-10-15 判明）。その人の了承を取るか、履歴から消す（git filter-repo＋force push）か、リポジトリを private にするかはユーザーが決める。
+  過去のコミットにあった 9/18 の計測データ（S002 のもの）は、2026-10-15 に git filter-repo で `data/` ごと履歴から消して force push 済み
+  （このためそれ以前のコミットのハッシュは変わった。今の履歴に残る data/ は `data/README.txt` だけ）。
+  GitHub は消したコミットもハッシュ指定でしばらく見えることがあるので、完全に消すなら GitHub サポートに依頼する。
 - 協力者の名前・動画・プロフィールを外部（Issue・発表資料など）に出さない。出すときは被験者ID（S002〜）で。
 - `data/_sessions/` と協力者の元動画は消さない・上書きしない（取り込みはコピー）。
 - RPE ラベルを汚さない: 申告は速度を見る前。評価では同一セッションのデータを train/test に跨がせない。
