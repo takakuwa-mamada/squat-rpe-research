@@ -3,7 +3,8 @@
 Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理由・関連研究・計測メニューの詳細は
 `docs/研究コンテキスト.md` にある。設計判断、論文・発表資料、実験計画に関わる作業の前には必ず読むこと。
 
-最終更新: 2026-09-27（方針転換: 汎用モデル先行・協力者6人は動画のみ・正面撮影。データ収集の準備を完了）
+最終更新: 2026-10-15（9/18 の計測は別人物 → S002 に分離、本人の初データ S001/SES005、IMU レップ検出の修正、受信時に重量・回数を入力）
+（前回: 2026-09-27 方針転換: 汎用モデル先行・協力者6人は動画のみ・正面撮影）
 
 ---
 
@@ -42,7 +43,9 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
   C 汎用＋本人の最初の k セッション ／ D 本人だけの学習曲線。
 - データの構成:
   - **本人 S001: IMU（BAR 1台）＋動画**。IMU は製品ではなく、動画由来のバー速度を検証する基準。
-  - **協力者 S002〜（約6人）: 動画のみ**、遠隔（Google Drive で受け取り、`ingest_remote.py` で取り込み）。倫理審査は問題なし（ユーザー確認済み）。
+  - **S002: 2026-09-18 に日本で計測した別の人物**（IMU＋動画、1セッション。当初 S001/SES004 と誤登録 → 2026-10-15 に移動）。
+    この人が協力者として Google Drive からも動画を送る場合は、`subjects.json` の S002 の source を `_remote/<ドライブのフォルダ名>` にして同じ ID にまとめる（別 ID になると LOSO で同じ人が学習と評価に跨る）。
+  - **協力者 S003〜（約6人）: 動画のみ**、遠隔（Google Drive で受け取り、`ingest_remote.py` で取り込み。ID は空いている次の番号）。倫理審査は問題なし（ユーザー確認済み）。
 - 撮影: **正面**・**1セット＝動画1本**（録画開始→ラックアウト→挙上→ラックイン→停止）。屈曲角・体幹前傾・プレート追跡は使わない。
 - 出力: セット単位の RPE（Zourdos 2016 の RIR ベース。10=限界、9=あと1回、8=あと2回）。
 - 研究課題（改訂案）:
@@ -54,11 +57,16 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
 ## 3. 現在地（2026-09-27）
 
 - **データ収集の準備は完了**。あとは本人（留学先）と協力者がデータを集めるだけ。手順は `docs/チートシート.txt`、協力者向けは `docs/協力者向け撮影ガイド.md`。
-- 実データは `data/S001/SES004` のみ（2026-09-18、BAR 1台、正面、縦長 720×1280、1レップ×3、130/160/170 kg、RPE 7/9/9）。
-  現行コードでの値（参考値、n=3）: IMU MCV 0.52 / 0.33 / 0.30 m/s、動画の上昇時間 1.04 / 1.37 / 1.50 s（IMU 1.02 / 1.49 / 1.67 s）。
-- `data/subjects.json` の S001 の身長・1RM は未記入（ユーザーに聞く）。身長で動画の速度を m/s に換算、1RM で %1RM を出す。
+- 被験者プロフィール（`data/subjects.json`）: **S001 本人 165 cm・1RM 150 kg**、**S002 173 cm・1RM 170 kg**。身長で動画の速度を m/s に換算、1RM で %1RM を出す。
+- `data/S002/SES001`（2026-09-18、日本、BAR 1台、正面、縦長 720×1280、1レップ×3、130/160/170 kg = 76/94/100 %1RM、RPE 7/9/9）。
+  IMU MCV 0.52 / 0.33 / 0.30 m/s（一般的な負荷-速度関係どおり）、動画の上昇時間 1.04 / 1.37 / 1.50 s（IMU 1.02 / 1.49 / 1.67 s）。
+- `data/S001/SES005`（2026-10-15、留学先、BAR 1台、正面、3レップ×3、80/90/90 kg = 53/60/60 %1RM、RPE 5/7/8）。IMU・骨格ともレップ 3/3/3。
+  IMU MCV（1レップ目）0.53 / 0.45 / 0.41 m/s、MCV の速度低下 −3.8 / 6.8 / 16.6 %（骨格 −0.3 / 15.8 / 21.4 %）。同じ 90 kg でも RPE 8 の方が遅く、低下も大きい（参考値）。
+  **%1RM の割に遅く RPE も高い**（S002 の 76〜94 % と同程度の速度）。1RM 150 kg がこの日の実力より高い可能性（移動・時差など）。
+  1RM が古いと %1RM の特徴量がずれるので、当面 %1RM は参考扱い。
+- 動画の速度の m/s 換算（身長 × 0.779）と IMU の MCV: 6 試技で動画が −3〜+20 %（平均 +8 %）高め。定義の違い（動画はボトム→トップ、IMU はピークの 5 % 閾値）も含む。RQ2 の初期値（参考）。
 - ファーム v4（PC 自動検出）はローカルで編集済み・未書き込み。WIFI_LIST にテザリングを追加して書き込むのはユーザー（出発前）。
-- テスト: `pytest scripts\test_pipeline.py -q`（合成データ 12 件、約 2 分）。
+- テスト: `pytest scripts\test_pipeline.py -q`（合成データ 13 件、約 1 分）。
 
 ## 4. ディレクトリ
 
@@ -75,7 +83,7 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
 │   ├─ subjects.json                         被験者ID ↔ 名前・プロフィール（身長・体重・1RM・歴）
 │   ├─ _sessions/session_YYYYMMDD_HHMMSS/   本人の受信スクリプトの生出力＋その日の動画（直下に置く）
 │   ├─ _remote/<名前>/<日付>/                協力者の受け取り置き場（--src で Google Drive から直接でも可）
-│   └─ S001/SES004/ …, S002/SES001/ …       解析用（meta.json, imu/, videos/, pose/, features/）
+│   └─ S001/SES005/ …, S002/SES001/ …       解析用（meta.json, imu/, videos/, pose/, features/）。S001 の次は SES006
 ├─ outputs/                  ★git 管理外。features_all.csv（1行=1セット）, quality_report.csv
 ├─ models/                   ★git 管理外。train_rpe_model.py の出力（report.md ほか）
 ├─ docs/                     研究計画書, チートシート, 協力者向け撮影ガイド, 研究コンテキスト.md, 計測メニュー.xlsx
@@ -87,7 +95,7 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
 
 ```powershell
 # 本人（IMU＋動画）: 計測後
-python scripts\split_session.py --subject S001 --session SES005 --weights 100,110,120 --reps 5,3,2
+python scripts\split_session.py --subject S001 --session SES006     # 重量・回数は受信時に入力済み（直すときだけ --weights/--reps）
 python scripts\run_pipeline.py                     # 骨格推定 → 特徴量 → 集計 → 品質レポート
 # 協力者（動画のみ）
 python scripts\ingest_remote.py --src "G:\マイドライブ\スクワット研究"
@@ -98,7 +106,7 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 
 | スクリプト | 役割 |
 |---|---|
-| `multi_imu_receiver.py` | 複数 M5 から UDP 5005 で受信。**UDP 5006 に PC の居場所の合図（"SQUATPC"）を毎秒ブロードキャスト**（v4 ファームが受け取る。`--no-beacon`）。キー: SPACE=セット開始/終了、5〜9=RPE、0=RPE10、u=取消、q=終了（**q で終えないと markers.csv が出ない**） |
+| `multi_imu_receiver.py` | 複数 M5 から UDP 5005 で受信。**UDP 5006 に PC の居場所の合図（"SQUATPC"）を毎秒ブロードキャスト**（v4 ファームが受け取る。`--no-beacon`）。キー: SPACE=セット開始/終了、5〜9=RPE、0=RPE10、u=取消、w=次の重量・回数（ターミナル入力）、q=終了（**q で終えないと markers.csv が出ない**）。**起動時に「重量 回数」を聞き**（`--weight`/`--reps` で省略可）、markers.csv の `weight_kg, reps` 列とフォルダ名 `_90kg_3rep` に入る |
 | `split_session.py` | `_sessions` → `data/S001/SESxxx/`。マーカーで切り出し（前後0.3 s）、直下の動画をファイル名順に setNN へ。`--weights`/`--reps` で一括入力、ファイル名 `130kg_3rep` からも読む。**再実行しても meta.json の手入力値は残る**。`--view`（既定 front） |
 | `ingest_remote.py` | 協力者: `<名前>/<日付>/*.mp4|mov` → `data/S00x/SESnnn/`。ラベルはファイル名（`100kg_5rep_RPE8`, `100kgx5@8`）か `記録.txt`（撮影順に「重量 回数 RPE」）。撮影順は ffprobe の撮影日時。`プロフィール.txt` → subjects.json。不備のあるフォルダは理由を出して取り込まない |
 | `run_pipeline.py` | pose → features → aggregate → **品質レポート**（ラベル欠損、検出失敗、足元切れ、正面でない、レップ数の不一致、M5 の向き、受信レート）＋被験者ごとの集まり具合。`--force-features` |
@@ -115,7 +123,7 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 
 - UDP: `DEVICE_ID,boot_ms,ax,ay,az,gx,gy,gz`（g・dps）。ビーコン: PC → UDP 5006 に `SQUATPC,<受信ポート>`。
 - `raw_<DEV>.csv`: `recv_time_s, boot_ms, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps`
-- `markers.csv`: `set_no, start_s, end_s, duration_s, rpe`
+- `markers.csv`: `set_no, start_s, end_s, duration_s, rpe, weight_kg, reps`（後ろ2列は 2026-10-15 以降。split_session は markers → 動画ファイル名 の順に使い、`--weights/--reps` が最優先）
 - `imu/setNN_<DEV>.csv`: 先頭に `timestamp_ms` =（recv_time_s − start_s）×1000
 - `meta.json`: `session_id, subject_id, date, source_sessions[], devices[], sampling_hz, modality(imu+video|video), camera_view(front), exercise, notes,`
   `sets[{set_no, csv_filename(動画のみは null), video_filename, weight_kg, reps_planned, reps_completed, rpe, rest_before_sec, duration_s, source_session|source_video, recorded_at, notes}]`
@@ -127,6 +135,9 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 
 1. **IMU 速度**: 3軸合成加速度 − 重力の実測値 → 積分 → レップごとに「ロックアウトで速度0・変位0」でドリフトを解く。
    レップは上昇 ROM ≥ 0.15 m で選ぶ（ラックインを拾わない）。合成 8 レップで MCV +2〜4%。
+   重いレップは上昇中の速度に山が2つできる（切り返し直後＋スティッキングポイント通過後）→ 同じ上昇区間のピークは1つにまとめ、
+   レップ数が多すぎるときは「時刻が連続する N 個で ROM 合計 − 間隔 6 s 超の減点」が最大の組を選ぶ（2026-10-15 修正。
+   それまでは同じレップが2回入り、本物が1つ落ちていた。テスト `test_imu_double_hump_ascent_counts_each_rep_once`）。
    0.3 Hz ハイパス（旧実装）は遅い挙上を削って上昇時間を短く出していた。水平方向の加速度が大きいと誤差。
    `imu_bar_roll/pitch_range_deg` はドリフト込みで使わない。セット全体の統計（imu_peak_velocity_up_mps 等）はラックの歩き出しを含むので学習に使わない。
 2. サンプル時刻は PC 受信時刻（Wi-Fi ジッタあり）。boot_ms → PC 時刻の線形写像は未対応。
@@ -177,7 +188,8 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 - `firmware/*/*.ino` には実際の Wi-Fi SSID・パスワード・IP が入っている。内容をドキュメント・Issue・コミットメッセージ・チャットに転記しない。コミットしない（.gitignore 済み）。
   編集するときも WIFI_LIST の行は表示しない（grep で除外する）。コミット前に `git ls-files firmware` で追跡されていないことを確認する。
 - **`data/`・`outputs/`・`models/` はコミットしない**（.gitignore 済み。リポジトリは public）。動画（`*.mp4`）と重み（`weights/*.pt`）も同様。
-  過去のコミット（〜d458d7b 以前）には SES004 のデータが残っている。
+  過去のコミット（〜d458d7b 以前）には 9/18 の計測データ（当時の S001/SES004 と `_sessions/session_20260918_*` の IMU・骨格キーポイント・meta。動画は無し）が残っている。
+  **これは本人ではなく S002 のデータ**（2026-10-15 判明）。その人の了承を取るか、履歴から消す（git filter-repo＋force push）か、リポジトリを private にするかはユーザーが決める。
 - 協力者の名前・動画・プロフィールを外部（Issue・発表資料など）に出さない。出すときは被験者ID（S002〜）で。
 - `data/_sessions/` と協力者の元動画は消さない・上書きしない（取り込みはコピー）。
 - RPE ラベルを汚さない: 申告は速度を見る前。評価では同一セッションのデータを train/test に跨がせない。
