@@ -13,6 +13,8 @@
 -------------------------------------------------------------
  1. テザリングON → PC接続
  2. python scripts\multi_imu_receiver.py
+    → 「重量 回数」を入力（例: 90 3）。ジム1回につき起動は1回だけ
+    → 重量・回数が変わるセットの前に グラフ画面で w → ターミナルで入力
  3. M5電源ON → 画面が「PC:xx.xx.xx.xx A」（緑）になればOK
  4. M5 をシャフト中央、画面が真上 → バー水平で az ≒ 1.0
                                      ★ここ外すと全部無駄
@@ -24,7 +26,7 @@
  7. q で終了 → mean Hz が 90〜100 か確認
 
  キー:  SPACE=セット区切り   6〜9=RPE   0=RPE10   5=RPE5
-        u=直前を取消        q=終了
+        w=次の重量・回数    u=直前を取消        q=終了
 
 
 ■ 帰宅後（本人）
@@ -34,7 +36,8 @@
  動画をスマホから data\_sessions\session_…\ の直下へコピー
  （撮影順 = セット順）
 
- python scripts\split_session.py --subject S001 --session SES005 --weights 100,110,120 --reps 5,3,2
+ python scripts\split_session.py --subject S001 --session SES005
+   （重量・回数は受信時に入れたものが自動で入る。直すときだけ --weights 100,110 --reps 5,3）
  python scripts\run_pipeline.py
    → 最後の「品質レポート」で 要確認 が出たらそこを直す
 

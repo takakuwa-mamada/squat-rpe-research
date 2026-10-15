@@ -20,7 +20,8 @@
 
  【特徴】
   ・セッションフォルダ直下に置いた動画を自動で見つけ、videos/setNN.mp4 に配置する
-  ・動画のファイル名から重量・回数を読む（130.mp4 / 130kg_3rep.mp4 → 130 kg, 3回）
+  ・重量・回数は 受信時に入れた値（markers.csv の weight_kg, reps 列）→ 動画のファイル名
+    （130.mp4 / 130kg_3rep.mp4 → 130 kg, 3回）の順に使う。--weights / --reps は全部に優先
   ・--weights / --reps で重量・回数をまとめて入れられる（ファイル名が IMG_1234 などのとき）
   ・複数のセッションを1つにまとめられる（受信を何度も起動し直した場合に使う）
   ・再実行しても、meta.json に手で入れた値（重量・回数・RPE・メモ）は残す
@@ -286,6 +287,13 @@ def main():
                 lab = guess_label(srcv.stem)
                 weight = lab.get("weight_kg")
                 reps = lab.get("reps")
+
+            # --- 受信時に入れた重量・回数（markers.csv の列。あればファイル名より優先）---
+            mw, mr = m.get("weight_kg"), m.get("reps")
+            if mw is not None and pd.notna(mw) and str(mw).strip() != "":
+                weight = float(mw)
+            if mr is not None and pd.notna(mr) and str(mr).strip() != "":
+                reps = int(float(mr))
 
             # --- RPE ---
             rpe = m.get("rpe")

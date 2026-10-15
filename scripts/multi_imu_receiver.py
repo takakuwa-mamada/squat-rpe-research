@@ -25,20 +25,27 @@
     0     : 同上で RPE 10
     5     : 同上で RPE 5
     u     : 直前のマーカーを取り消し
+    w     : 次のセットの重量・回数を変更（ターミナルで入力）
     q     : 終了
 
     ※ RPE 8.5 などの中間値は、生成された markers.csv を後から編集する
 
+ 【重量・回数】
+    起動時にターミナルで「重量 回数」を聞く（例: 90 3。Enter だけでスキップ）。
+    入れた値は以降の全セットに付く。途中で変えるときはグラフ画面で w。
+    --weight 90 --reps 3 で起動すれば質問を省略できる。
+
  【出力】
-    data/_sessions/session_YYYYMMDD_HHMMSS/
+    data/_sessions/session_YYYYMMDD_HHMMSS[_90kg_3rep]/
         raw_BAR.csv       … デバイスごとの連続データ
         raw_TRUNK.csv
         ...
-        markers.csv       … set_no, start_s, end_s, rpe
+        markers.csv       … set_no, start_s, end_s, duration_s, rpe, weight_kg, reps
         session_info.json … 受信統計・デバイス一覧
 
  使い方:
     python multi_imu_receiver.py
+    python multi_imu_receiver.py --weight 90 --reps 3
     python multi_imu_receiver.py --port 5005
     python multi_imu_receiver.py --outdir data/_sessions
 
@@ -112,6 +119,10 @@ class SessionRecorder:
         self.current_start = None
         self.set_no = 0
 
+        # 次のセットに付ける重量・回数（起動時と w キーで設定）
+        self.weight_kg = None
+        self.reps = None
+
         self.t0 = time.time()    # セッション基準時刻
 
     # ---- データ書き込み ----
@@ -147,6 +158,8 @@ class SessionRecorder:
                 "end_s": round(now_s, 4),
                 "duration_s": round(now_s - self.current_start, 2),
                 "rpe": None,
+                "weight_kg": self.weight_kg,
+                "reps": self.reps,
             })
             self.recording_set = False
             dur = now_s - self.current_start
@@ -180,10 +193,11 @@ class SessionRecorder:
         mpath = self.dir / "markers.csv"
         with open(mpath, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["set_no", "start_s", "end_s", "duration_s", "rpe"])
+            w.writerow(["set_no", "start_s", "end_s", "duration_s", "rpe", "weight_kg", "reps"])
+            blank = lambda v: "" if v is None else v
             for m in self.markers:
-                w.writerow([m["set_no"], m["start_s"], m["end_s"],
-                            m["duration_s"], m["rpe"] if m["rpe"] is not None else ""])
+                w.writerow([m["set_no"], m["start_s"], m["end_s"], m["duration_s"],
+                            blank(m["rpe"]), blank(m.get("weight_kg")), blank(m.get("reps"))])
 
         # session_info.json
         info = {
@@ -312,6 +326,37 @@ class Beacon(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
+# 重量・回数の入力
+# ---------------------------------------------------------------------------
+def parse_weight_reps(text):
+    """「90 3」「90,3」「90kg 3rep」「90」→ (90.0, 3) / (90.0, None)。空なら (None, None)"""
+    import re
+    nums = re.findall(r"\d+(?:\.\d+)?", text or "")
+    weight = float(nums[0]) if len(nums) >= 1 else None
+    reps = int(float(nums[1])) if len(nums) >= 2 else None
+    return weight, reps
+
+
+def ask_weight_reps(cur_w=None, cur_r=None):
+    """ターミナルで重量・回数を聞く。Enter だけなら今の値のまま"""
+    now = f"（今: {fmt_wr(cur_w, cur_r)}）" if (cur_w or cur_r) else ""
+    try:
+        text = input(f"  重量[kg] 回数 を入力 例: 90 3 {now}> ").strip()
+    except EOFError:
+        text = ""
+    if not text:
+        return cur_w, cur_r
+    w, r = parse_weight_reps(text)
+    return (w if w is not None else cur_w), (r if r is not None else cur_r)
+
+
+def fmt_wr(w, r):
+    wt = f"{w:g}kg" if w is not None else "重量?"
+    rt = f"{r}rep" if r is not None else "回数?"
+    return f"{wt} x {rt}"
+
+
+# ---------------------------------------------------------------------------
 # メイン
 # ---------------------------------------------------------------------------
 def main():
@@ -321,11 +366,25 @@ def main():
                     help="PC の居場所を知らせる合図を送らない（ファームの pc_ip 固定で使う）")
     ap.add_argument("--outdir", type=str,
                     default=str(PROJECT_ROOT / "data" / "_sessions"))
+    ap.add_argument("--weight", type=float, default=None, help="重量 [kg]（以降の全セットに付く）")
+    ap.add_argument("--reps", type=int, default=None, help="回数（以降の全セットに付く）")
     args = ap.parse_args()
 
+    # 重量・回数（指定が無ければ起動時に聞く）
+    weight, reps = args.weight, args.reps
+    if weight is None and reps is None:
+        print("最初のセットの重量と回数を入れてください（Enter だけでスキップ。途中で変えるときはグラフ画面で w）")
+        weight, reps = ask_weight_reps()
+
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(args.outdir).resolve() / f"session_{stamp}"
+    suffix = ""
+    if weight is not None:
+        suffix += f"_{weight:g}kg"
+    if reps is not None:
+        suffix += f"_{reps}rep"
+    out_dir = Path(args.outdir).resolve() / f"session_{stamp}{suffix}"
     recorder = SessionRecorder(out_dir)
+    recorder.weight_kg, recorder.reps = weight, reps
 
     maxlen = int(PLOT_WINDOW_S * EXPECTED_HZ * 1.5)
     buffers = defaultdict(lambda: {"t": deque(maxlen=maxlen),
@@ -338,10 +397,12 @@ def main():
     print("=" * 68)
     print(f"  出力先 : {out_dir}")
     print(f"  ポート : {args.port}")
+    print(f"  重量・回数: {fmt_wr(weight, reps)}")
     print()
     print("  [SPACE] セット開始 / 終了")
     print("  [6-9]   直前のセットに RPE 6〜9 を付与     [0] RPE 10   [5] RPE 5")
     print("  [u]     直前のマーカーを取り消し")
+    print("  [w]     次のセットの重量・回数を変更（ターミナルで入力）")
     print("  [q]     終了")
     print()
     print("  ※ グラフウィンドウにフォーカスを当てて操作してください")
@@ -425,17 +486,18 @@ def main():
             rows.append(f"  bad lines: {rx.bad_lines}")
         status_text.set_text("\n".join(rows))
 
+        wr = fmt_wr(recorder.weight_kg, recorder.reps)
         if recorder.recording_set:
             el = now - recorder.current_start
-            set_text.set_text(f"● REC  SET {recorder.set_no}   {el:5.1f}s")
+            set_text.set_text(f"● REC  SET {recorder.set_no}   {el:5.1f}s\n{wr}")
             set_text.set_color("#C62828")
         else:
             last = recorder.markers[-1] if recorder.markers else None
             if last:
                 r = last["rpe"] if last["rpe"] is not None else "-"
-                set_text.set_text(f"idle   last: SET{last['set_no']}  RPE {r}")
+                set_text.set_text(f"idle   last: SET{last['set_no']}  RPE {r}\nnext: {wr}")
             else:
-                set_text.set_text("idle")
+                set_text.set_text(f"idle\nnext: {wr}")
             set_text.set_color("#333333")
 
         return list(lines.values()) + [status_text, set_text]
@@ -468,6 +530,14 @@ def main():
                 print(f"  SET {no} のマーカーを削除しました")
             else:
                 print("  取り消すマーカーがありません")
+
+        elif k == "w":
+            if recorder.recording_set:
+                print("  セット中は変更できません（SPACE でセットを終えてから w）")
+            else:
+                print("\n[重量・回数の変更] ターミナルで入力してください（その間グラフは止まります）")
+                recorder.weight_kg, recorder.reps = ask_weight_reps(recorder.weight_kg, recorder.reps)
+                print(f"  次のセット: {fmt_wr(recorder.weight_kg, recorder.reps)}")
 
         elif k == "q":
             print("\n[INFO] 終了します...")
@@ -507,7 +577,8 @@ def main():
         print()
         for m in recorder.markers:
             r = m["rpe"] if m["rpe"] is not None else "未入力"
-            print(f"  SET {m['set_no']:>2d}  {m['duration_s']:>6.1f}s   RPE {r}")
+            print(f"  SET {m['set_no']:>2d}  {m['duration_s']:>6.1f}s   "
+                  f"{fmt_wr(m.get('weight_kg'), m.get('reps'))}   RPE {r}")
         print()
         print(f"  マーカー   : {mpath}")
         print("  ※ RPE の中間値(8.5等)や未入力分は markers.csv を編集してください")
