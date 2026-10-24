@@ -79,7 +79,10 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
   - 同じ人の中の比較（速度低下 % など）は一定倍率なら影響しない。人をまたぐ絶対値（m/s）には補正が要る。速度低下は動画の方がばらつく（S001 set2: IMU 6.8 % / 動画 14.3 %）。
   - 改善案（未着手）: 正面から見えるプレートの縦の長さ（直径 45 cm）を物差しにしてバーそのものを追う／IMU の6面キャリブレーション。
 - ファーム v4（PC 自動検出）はローカルで編集済み・未書き込み。WIFI_LIST にテザリングを追加して書き込むのはユーザー（出発前）。
-- テスト: `pytest scripts\test_pipeline.py -q`（合成データ 13 件、約 1 分）。
+- テスト: `pytest scripts\test_pipeline.py -q`（合成データ 14 件、約 1.5 分）。
+- **RPE 5 以下のセットの扱い（2026-10-24 決定）**: ウォームアップは研究データにしない。本番セットの RPE 5 以下は保存して学習にも使う。
+  `train_rpe_model.py` は学習データを「全 RPE」と「RPE 5 以上だけ」の2通りで作り（テストは同じセット）、評価を「全セット」と「RPE 6 以上」で出す。
+  主結果は「学習: 全 RPE／評価: RPE 6 以上」。RPE 5 以下は申告がぶれやすい（限界から遠いほど RIR の見積もりがずれる）ため主評価から外す。
 
 ## 4. ディレクトリ
 
@@ -126,7 +129,7 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 | `pose_extract_yolo.py` | YOLO26 Pose で 17 点。**挙上者を追跡**（初回は最大の人、以降は前フレームに最も近い人）。`_yolo_info.json` に動画の縦横サイズ。`data/_remote` は対象外 |
 | `extract_features.py` | 1セット → JSON。IMU（レップ単位の MCV/MPV/ピーク/VL/上昇時間）＋骨格（正面用 22 次元）＋ %1RM。動画だけの試技も可。`_imu_reps`/`_pose_reps` にレップ詳細 |
 | `aggregate_features.py` | 全 JSON → `outputs/features_all.csv`（`_` で始まるキーは入れない） |
-| `train_rpe_model.py` | 評価 A/B/C/D × 条件（context / imu_velocity / imu_all / video_velocity / video_all / imu+video、`--with-context`）。特徴量は明示リスト。report.md、図、best.pkl |
+| `train_rpe_model.py` | 評価 A/B/C/D × 条件（context / imu_velocity / imu_all / video_velocity / video_all / imu+video、`--with-context`）× **学習の範囲（全 RPE ／ RPE 5 以上、`--train-min-rpe`）× 評価の範囲（全セット ／ RPE 6 以上 = 主結果、`--eval-min-rpe`）**。RPE 5 未満が無いと学習は全 RPE だけ。特徴量は明示リスト。report.md（後半に範囲の比較表）、図、best.pkl |
 | `predict_rpe.py` | 学習済みモデルで予測（`--latest` は best.pkl 優先） |
 | `test_pipeline.py` | 合成データのテスト（複数レップの骨格・IMU、ラベル解析、評価の通し） |
 | `bar_path_extract.py` + `bar_tracking.py` | プレート追跡（**側面撮影が前提なので現方針では使わない**） |

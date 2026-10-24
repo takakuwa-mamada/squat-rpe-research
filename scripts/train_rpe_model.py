@@ -22,10 +22,20 @@
    --with-context で、各条件に %1RM・回数を足した版（*+ctx）も出す
    IMU の条件は IMU のある試技（本人）だけで評価する
 
+ 学習データの範囲（RPE 5 未満の軽いセットを学習に入れるか）:
+   all       全 RPE で学習（図・保存モデルはこちら）
+   rpe>=5    RPE 5 以上のセットだけで学習（--train-min-rpe で変更）
+   ※ テストに使うセットはどちらも同じなので、MAE をそのまま比べられる
+   ※ RPE 5 未満のセットが 1 つも無いときは all だけ
+ 評価の範囲:
+   all       テストの全セット
+   rpe>=6    RPE 6 以上のセットだけ（実際にトレーニングで使う範囲。主結果。--eval-min-rpe で変更）
+   ※ RPE 5 以下は申告がぶれやすい（限界から遠いほど RIR の見積もりがずれる）ため、主結果から外す
+
  出力: models/<日時>/
-   report.md          結果のまとめ（表・図へのリンク・データの内訳）
-   results.csv        方式 × 条件 × モデル の MAE / RMSE / ±0.5・±1.0 以内率
-   curves.csv         方式 C・D の k ごとの結果
+   report.md          結果のまとめ（表・図へのリンク・データの内訳・学習データの範囲の比較）
+   results.csv        方式 × 条件 × モデル × 学習の範囲 × 評価の範囲 の MAE / RMSE / ±0.5・±1.0 以内率
+   curves.csv         方式 C・D の k ごとの結果（学習の範囲・評価の範囲つき）
    predictions.csv    全予測（どのフォールドで予測したか付き）
    fig_*.png          比較の棒グラフ、学習曲線、散布図、特徴量重要度
    <条件>__<モデル>.pkl, best.pkl   全データで学習し直したモデル（predict_rpe.py 用）
@@ -34,6 +44,7 @@
    python scripts\\train_rpe_model.py
    python scripts\\train_rpe_model.py --with-context
    python scripts\\train_rpe_model.py --input outputs\\features_all.csv --kmax 6
+   python scripts\\train_rpe_model.py --train-min-rpe 5 --eval-min-rpe 6   # 既定値
 
  依存: pip install numpy pandas scikit-learn matplotlib joblib
 =============================================================================
@@ -71,7 +82,8 @@ PROJECT_ROOT = SCRIPT_DIR.parent if (SCRIPT_DIR.parent / "data").is_dir() else S
 DEFAULT_INPUT = PROJECT_ROOT / "outputs" / "features_all.csv"
 DEFAULT_OUTDIR = PROJECT_ROOT / "models"
 
-RPE_MIN, RPE_MAX = 5.0, 10.0
+RPE_FLOOR, RPE_MAX = 1.0, 10.0   # RPE の目盛りの下限・上限（予測をこの範囲に収める）
+MAIN_TRAIN = "all"               # 図・保存モデルに使う学習データの範囲
 
 # ---------------------------------------------------------------------------
 # 特徴量セット（明示的に列挙する。記録長・品質指標・ドリフトを含む列は使わない）
@@ -149,15 +161,44 @@ def metrics(y, p) -> dict:
             "hit05": float(np.mean(np.abs(e) <= 0.5)), "hit10": float(np.mean(np.abs(e) <= 1.0))}
 
 
-def fit_predict(model_name, cols, train, test):
-    """列が学習データで全部欠損なら落としてから学習する"""
+def fit_predict(model_name, cols, train, test, clip_lo=RPE_FLOOR):
+    """列が学習データで全部欠損なら落としてから学習する。予測は [clip_lo, 10] に収める"""
     use = [c for c in cols if c in train and train[c].notna().any()]
     if not use or len(train) < 3:
         return None, use
     m = make_model(model_name)
     m.fit(train[use].to_numpy(float), train["rpe"].to_numpy(float))
-    pred = np.clip(m.predict(test[use].to_numpy(float)), RPE_MIN, RPE_MAX)
+    pred = np.clip(m.predict(test[use].to_numpy(float)), clip_lo, RPE_MAX)
     return (pred, m), use
+
+
+def restrict(train: pd.DataFrame, train_min) -> pd.DataFrame:
+    """学習データだけを RPE で絞る（テストは絞らない）。train_min が None なら全部使う"""
+    return train if train_min is None else train[train["rpe"] >= train_min]
+
+
+def clip_low(train_min) -> float:
+    """予測の下限: RPE 5 以上だけで学習したモデルは 5 未満を予測しない"""
+    return RPE_FLOOR if train_min is None else float(train_min)
+
+
+def eval_rows(base: dict, te: pd.DataFrame, pred, eval_sets: dict) -> list:
+    """1 つのテストの予測を、評価の範囲ごとに集計した行にする"""
+    y, p = te["rpe"].to_numpy(float), np.asarray(pred, float)
+    out = []
+    for ename, emin in eval_sets.items():
+        sel = np.ones(len(y), bool) if emin is None else (y >= emin)
+        if sel.any():
+            out.append(dict(base, eval_set=ename, **metrics(y[sel], p[sel])))
+    return out
+
+
+def label_train(name: str) -> str:
+    return "全 RPE" if name == "all" else name.replace("rpe>=", "RPE ") + " 以上"
+
+
+def label_eval(name: str) -> str:
+    return "全セット" if name == "all" else name.replace("rpe>=", "RPE ") + " 以上"
 
 
 def eligible(df, cond) -> pd.DataFrame:
@@ -172,8 +213,8 @@ def sessions_in_order(d: pd.DataFrame) -> list:
 # ---------------------------------------------------------------------------
 # 評価方式
 # ---------------------------------------------------------------------------
-def scheme_within(df, conds, min_sessions, log):
-    """A. 本人専用: 被験者ごとに Leave-One-Session-Out"""
+def scheme_within(df, conds, train_sets, min_sessions, log):
+    """A. 本人専用: 被験者ごとに Leave-One-Session-Out（学習データの範囲ごと）"""
     rows = []
     for cname, cond in conds.items():
         d_all = eligible(df, cond)
@@ -182,20 +223,22 @@ def scheme_within(df, conds, min_sessions, log):
             if len(sess) < min_sessions:
                 log.add(f"A 本人専用 / {cname} / {sid}: セッション {len(sess)} < {min_sessions} のためスキップ")
                 continue
-            for mname in cond["models"]:
-                for s in sess:
-                    tr, te = d[d["session_id"] != s], d[d["session_id"] == s]
-                    res, _ = fit_predict(mname, cond["cols"], tr, te)
-                    if res is None:
-                        continue
-                    rows += [dict(scheme="A_within", condition=cname, model=mname, subject_id=sid,
-                                  session_id=s, set_no=r.set_no, fold=f"{sid}/{s}", rpe=r.rpe, pred=p)
-                             for r, p in zip(te.itertuples(), res[0])]
+            for tname, tmin in train_sets.items():
+                for mname in cond["models"]:
+                    for s in sess:
+                        tr, te = restrict(d[d["session_id"] != s], tmin), d[d["session_id"] == s]
+                        res, _ = fit_predict(mname, cond["cols"], tr, te, clip_low(tmin))
+                        if res is None:
+                            continue
+                        rows += [dict(scheme="A_within", condition=cname, model=mname, train_set=tname,
+                                      subject_id=sid, session_id=s, set_no=r.set_no, fold=f"{sid}/{s}",
+                                      rpe=r.rpe, pred=p)
+                                 for r, p in zip(te.itertuples(), res[0])]
     return rows
 
 
-def scheme_loso(df, conds, min_subjects, log):
-    """B. 汎用: Leave-One-Subject-Out"""
+def scheme_loso(df, conds, train_sets, min_subjects, log):
+    """B. 汎用: Leave-One-Subject-Out（学習データの範囲ごと）"""
     rows = []
     for cname, cond in conds.items():
         d = eligible(df, cond)
@@ -203,20 +246,22 @@ def scheme_loso(df, conds, min_subjects, log):
         if len(subs) < min_subjects:
             log.add(f"B 汎用 / {cname}: 被験者 {len(subs)} 人 < {min_subjects} 人のためスキップ")
             continue
-        for mname in cond["models"]:
-            for sid in subs:
-                tr, te = d[d["subject_id"] != sid], d[d["subject_id"] == sid]
-                res, _ = fit_predict(mname, cond["cols"], tr, te)
-                if res is None:
-                    continue
-                rows += [dict(scheme="B_loso", condition=cname, model=mname, subject_id=sid,
-                              session_id=r.session_id, set_no=r.set_no, fold=sid, rpe=r.rpe, pred=p)
-                         for r, p in zip(te.itertuples(), res[0])]
+        for tname, tmin in train_sets.items():
+            for mname in cond["models"]:
+                for sid in subs:
+                    tr, te = restrict(d[d["subject_id"] != sid], tmin), d[d["subject_id"] == sid]
+                    res, _ = fit_predict(mname, cond["cols"], tr, te, clip_low(tmin))
+                    if res is None:
+                        continue
+                    rows += [dict(scheme="B_loso", condition=cname, model=mname, train_set=tname,
+                                  subject_id=sid, session_id=r.session_id, set_no=r.set_no, fold=sid,
+                                  rpe=r.rpe, pred=p)
+                             for r, p in zip(te.itertuples(), res[0])]
     return rows
 
 
-def scheme_curves(df, conds, kmax, log):
-    """C. 汎用＋本人 k セッション / D. 本人だけの学習曲線（各条件の代表モデルで）"""
+def scheme_curves(df, conds, train_sets, eval_sets, kmax, log):
+    """C. 汎用＋本人 k セッション / D. 本人だけの学習曲線（各条件の代表モデルで、学習・評価の範囲ごと）"""
     rows = []
     for cname, cond in conds.items():
         mname = "linear" if cond["models"] == ["linear"] else "hgb"
@@ -228,23 +273,46 @@ def scheme_curves(df, conds, kmax, log):
             for k in range(0, min(len(sess) - 1, kmax) + 1):
                 train_me = me[me["session_id"].isin(sess[:k])]
                 te = me[me["session_id"].isin(sess[k:])]
-                # C: 他の人 ＋ 本人 k セッション（他の人が 2 人以上いるとき）
-                if others["subject_id"].nunique() >= 2:
-                    res, _ = fit_predict(mname, cond["cols"], pd.concat([others, train_me]), te)
-                    if res is not None:
-                        rows.append(dict(scheme="C_general_plus_k", condition=cname, model=mname,
-                                         subject_id=sid, k=k, n_train_me=len(train_me),
-                                         **metrics(te["rpe"], res[0])))
-                # D: 本人だけ（k ≥ 1）
-                if k >= 1 and len(train_me) >= 3:
-                    res, _ = fit_predict(mname, cond["cols"], train_me, te)
-                    if res is not None:
-                        rows.append(dict(scheme="D_personal_curve", condition=cname, model=mname,
-                                         subject_id=sid, k=k, n_train_me=len(train_me),
-                                         **metrics(te["rpe"], res[0])))
+                for tname, tmin in train_sets.items():
+                    tr_me = restrict(train_me, tmin)
+                    base = dict(condition=cname, model=mname, train_set=tname, subject_id=sid, k=k,
+                                n_train_me=len(tr_me))
+                    # C: 他の人 ＋ 本人 k セッション（他の人が 2 人以上いるとき）
+                    if others["subject_id"].nunique() >= 2:
+                        res, _ = fit_predict(mname, cond["cols"], pd.concat([restrict(others, tmin), tr_me]),
+                                             te, clip_low(tmin))
+                        if res is not None:
+                            rows += eval_rows(dict(base, scheme="C_general_plus_k"), te, res[0], eval_sets)
+                    # D: 本人だけ（k ≥ 1）
+                    if k >= 1 and len(tr_me) >= 3:
+                        res, _ = fit_predict(mname, cond["cols"], tr_me, te, clip_low(tmin))
+                        if res is not None:
+                            rows += eval_rows(dict(base, scheme="D_personal_curve"), te, res[0], eval_sets)
     if not rows:
         log.add("C/D 学習曲線: 2セッション以上ある被験者がいないためスキップ")
     return rows
+
+
+def summarize(pred: pd.DataFrame, eval_sets: dict) -> pd.DataFrame:
+    """予測を 方式 × 条件 × モデル × 学習の範囲 × 評価の範囲 ごとに集計する"""
+    out = []
+    for ename, emin in eval_sets.items():
+        p = pred if emin is None else pred[pred["rpe"] >= emin]
+        if p.empty:
+            continue
+        r = (p.groupby(["scheme", "condition", "model", "train_set"])
+             .apply(lambda g: pd.Series({**metrics(g["rpe"], g["pred"]),
+                                         "subjects": g["subject_id"].nunique(),
+                                         "folds": g["fold"].nunique()}))
+             .reset_index())
+        r.insert(4, "eval_set", ename)
+        out.append(r)
+    if not out:
+        return pd.DataFrame()
+    res = pd.concat(out, ignore_index=True)
+    for c in ("n", "subjects", "folds"):
+        res[c] = res[c].astype(int)
+    return res.sort_values(["scheme", "train_set", "eval_set", "mae"])
 
 
 def importance_on_folds(df, cond, scheme, min_sessions):
@@ -327,8 +395,9 @@ def fig_scatter(pred: pd.DataFrame, out: Path, title: str):
     jitter = np.random.default_rng(0).normal(0, 0.05, len(pred))
     for sid, g in pred.groupby("subject_id"):
         ax.scatter(g["rpe"] + jitter[:len(g)], g["pred"], s=18, alpha=0.7, label=sid)
-    ax.plot([RPE_MIN, RPE_MAX], [RPE_MIN, RPE_MAX], "k--", lw=0.8)
-    ax.fill_between([RPE_MIN, RPE_MAX], [RPE_MIN - 1, RPE_MAX - 1], [RPE_MIN + 1, RPE_MAX + 1],
+    lo = float(np.floor(min(pred["rpe"].min(), pred["pred"].min())))
+    ax.plot([lo, RPE_MAX], [lo, RPE_MAX], "k--", lw=0.8)
+    ax.fill_between([lo, RPE_MAX], [lo - 1, RPE_MAX - 1], [lo + 1, RPE_MAX + 1],
                     color="gray", alpha=0.12, label="±1 RPE")
     ax.set_xlabel("申告 RPE")
     ax.set_ylabel("推定 RPE")
@@ -377,6 +446,10 @@ def main():
     ap.add_argument("--min-sessions", type=int, default=3, help="本人専用の評価に必要なセッション数")
     ap.add_argument("--min-subjects", type=int, default=3, help="汎用の評価に必要な被験者数")
     ap.add_argument("--kmax", type=int, default=8, help="学習曲線の k の上限")
+    ap.add_argument("--train-min-rpe", type=float, default=5.0,
+                    help="比較用に「この RPE 以上だけで学習」した版も作る（既定 5）")
+    ap.add_argument("--eval-min-rpe", type=float, default=6.0,
+                    help="主結果の評価範囲: この RPE 以上のセット（既定 6）")
     args = ap.parse_args()
 
     df = pd.read_csv(args.input)
@@ -393,6 +466,19 @@ def main():
     conds = build_conditions(df, args.with_context)
     log = Log()
 
+    # 学習データの範囲（全 RPE ／ RPE 5 以上だけ）と評価の範囲（全セット ／ RPE 6 以上）
+    train_sets = {"all": None}
+    if (df["rpe"] < args.train_min_rpe).any():
+        train_sets[f"rpe>={args.train_min_rpe:g}"] = args.train_min_rpe
+    else:
+        log.add(f"学習データの範囲の比較: RPE {args.train_min_rpe:g} 未満のセットが無いので「全 RPE」だけで学習")
+    eval_sets = {"all": None}
+    if (df["rpe"] < args.eval_min_rpe).any() and (df["rpe"] >= args.eval_min_rpe).any():
+        eval_sets[f"rpe>={args.eval_min_rpe:g}"] = args.eval_min_rpe
+    main_eval = list(eval_sets)[-1]          # RPE 6 以上があればそれ、無ければ全セット
+    print(f"[範囲] 学習: {', '.join(label_train(t) for t in train_sets)}　"
+          f"評価: {', '.join(label_eval(e) for e in eval_sets)}（主結果: {label_eval(main_eval)}）")
+
     # データの内訳
     inv = (df.groupby("subject_id")
            .agg(sessions=("session_id", "nunique"), trials=("rpe", "size"),
@@ -402,44 +488,50 @@ def main():
            .reset_index())
     print("[DATA]\n" + inv.to_string(index=False))
 
-    pred = pd.DataFrame(scheme_within(df, conds, args.min_sessions, log)
-                        + scheme_loso(df, conds, args.min_subjects, log))
-    curves = pd.DataFrame(scheme_curves(df, conds, args.kmax, log))
+    pred = pd.DataFrame(scheme_within(df, conds, train_sets, args.min_sessions, log)
+                        + scheme_loso(df, conds, train_sets, args.min_subjects, log))
+    curves = pd.DataFrame(scheme_curves(df, conds, train_sets, eval_sets, args.kmax, log))
 
-    res = pd.DataFrame()
-    if not pred.empty:
-        res = (pred.groupby(["scheme", "condition", "model"])
-               .apply(lambda g: pd.Series({**metrics(g["rpe"], g["pred"]),
-                                           "subjects": g["subject_id"].nunique(),
-                                           "folds": g["fold"].nunique()}))
-               .reset_index().sort_values(["scheme", "mae"]))
+    res = summarize(pred, eval_sets) if not pred.empty else pd.DataFrame()
+    if not res.empty:
         res.to_csv(out_dir / "results.csv", index=False, encoding="utf-8-sig")
         pred.to_csv(out_dir / "predictions.csv", index=False, encoding="utf-8-sig")
     if not curves.empty:
         curves.to_csv(out_dir / "curves.csv", index=False, encoding="utf-8-sig")
+
+    # 主結果（図・保存モデル・表）: 学習 = 全 RPE、評価 = RPE 6 以上（無ければ全セット）
+    def main_view(t: pd.DataFrame) -> pd.DataFrame:
+        if t.empty:
+            return t
+        return t[(t["train_set"] == MAIN_TRAIN) & (t["eval_set"] == main_eval)]
+    res_main, curves_main = main_view(res), main_view(curves)
+    eval_note = f"（評価: {label_eval(main_eval)}）"
 
     # 図
     figs = {}
     titles = {"A_within": "A. 本人専用（被験者内 Leave-One-Session-Out）",
               "B_loso": "B. 汎用（Leave-One-Subject-Out）"}
     for sch, t in titles.items():
-        if not res.empty and (f := fig_compare(res, sch, out_dir / f"fig_compare_{sch}.png", t)):
+        if not res_main.empty and (f := fig_compare(res_main, sch, out_dir / f"fig_compare_{sch}.png",
+                                                    t + eval_note)):
             figs[sch] = f
-    if not curves.empty:
-        if f := fig_curve(curves, "D_personal_curve", out_dir / "fig_curve_personal.png",
-                          "D. 本人のデータだけで学習（学習曲線）"):
+    if not curves_main.empty:
+        if f := fig_curve(curves_main, "D_personal_curve", out_dir / "fig_curve_personal.png",
+                          "D. 本人のデータだけで学習（学習曲線）" + eval_note):
             figs["D"] = f
-        if f := fig_curve(curves, "C_general_plus_k", out_dir / "fig_curve_general_plus_k.png",
-                          "C. 汎用モデル ＋ 本人 k セッション"):
+        if f := fig_curve(curves_main, "C_general_plus_k", out_dir / "fig_curve_general_plus_k.png",
+                          "C. 汎用モデル ＋ 本人 k セッション" + eval_note):
             figs["C"] = f
-    primary = "B_loso" if (not res.empty and (res["scheme"] == "B_loso").any()) else "A_within"
+    primary = "B_loso" if (not res_main.empty and (res_main["scheme"] == "B_loso").any()) else "A_within"
     best_row = None
-    if not res.empty and (res["scheme"] == primary).any():
-        best_row = res[res["scheme"] == primary].sort_values("mae").iloc[0]
+    if not res_main.empty and (res_main["scheme"] == primary).any():
+        best_row = res_main[res_main["scheme"] == primary].sort_values("mae").iloc[0]
         bp = pred[(pred["scheme"] == primary) & (pred["condition"] == best_row["condition"])
-                  & (pred["model"] == best_row["model"])]
+                  & (pred["model"] == best_row["model"]) & (pred["train_set"] == MAIN_TRAIN)]
+        if eval_sets[main_eval] is not None:
+            bp = bp[bp["rpe"] >= eval_sets[main_eval]]
         figs["scatter"] = fig_scatter(bp, out_dir / "fig_scatter_best.png",
-                                      f"{titles[primary]}\n{best_row['condition']} ({best_row['model']})")
+                                      f"{titles[primary]}{eval_note}\n{best_row['condition']} ({best_row['model']})")
     # 特徴量重要度: 汎用評価があればそれで、無ければ（IMU は本人だけなど）本人専用の評価で
     for cname in ["video_all", "imu+video"]:
         if cname not in conds or res.empty:
@@ -473,16 +565,37 @@ def main():
     # レポート
     lines = [f"# RPE 推定 評価レポート（{datetime.now():%Y-%m-%d %H:%M}）", "",
              f"入力: `{Path(args.input).name}`　試技 {len(df)}　被験者 {df['subject_id'].nunique()} 人", "",
+             f"主結果は「学習: {label_train(MAIN_TRAIN)}／評価: {label_eval(main_eval)}」。"
+             f"学習データの範囲の比較は後半の表。", "",
              "## データの内訳", "", md_table(inv), ""]
-    if not res.empty:
+    if not res_main.empty:
         for sch, t in titles.items():
-            r = res[res["scheme"] == sch]
+            r = res_main[res_main["scheme"] == sch]
             if r.empty:
                 continue
-            lines += [f"## {t}", "", md_table(r[["condition", "model", "n", "subjects", "folds",
-                                                  "mae", "rmse", "hit05", "hit10"]]), ""]
+            lines += [f"## {t}{eval_note}", "", md_table(r[["condition", "model", "n", "subjects", "folds",
+                                                             "mae", "rmse", "hit05", "hit10"]]), ""]
             if sch in figs:
                 lines += [f"![]({figs[sch]})", ""]
+    # 学習データの範囲 × 評価の範囲（各条件で、主結果がいちばん良いモデル）
+    if not res.empty and (len(train_sets) > 1 or len(eval_sets) > 1):
+        lines += ["## 学習データの範囲の比較（RPE 5 未満の軽いセットを学習に入れるか）", "",
+                  "セルは MAE / ±1 RPE 以内率（n）。テストに使うセットはどちらの学習でも同じ。", ""]
+        for sch, t in titles.items():
+            r = res[res["scheme"] == sch]
+            if r.empty or res_main.empty:
+                continue
+            best_m = (res_main[res_main["scheme"] == sch].sort_values("mae")
+                      .groupby("condition").head(1)[["condition", "model"]])
+            tab = r.merge(best_m, on=["condition", "model"])
+            if tab.empty:
+                continue
+            tab["cell"] = [f"{m:.2f} / {h:.0%}（{int(n)}）" for m, h, n in zip(tab["mae"], tab["hit10"], tab["n"])]
+            piv = tab.pivot_table(index=["condition", "model"], columns=["train_set", "eval_set"],
+                                  values="cell", aggfunc="first")
+            piv = piv.reindex(columns=[(tr, ev) for tr in train_sets for ev in eval_sets]).fillna("—")
+            piv.columns = [f"学習 {label_train(tr)} → 評価 {label_eval(ev)}" for tr, ev in piv.columns]
+            lines += [f"### {t}", "", md_table(piv.reset_index()), ""]
     for key, t in [("D", "## D. 本人のデータだけで学習（何セッションで実用水準か）"),
                    ("C", "## C. 汎用モデル ＋ 本人 k セッション（パーソナライズの効果）")]:
         if key in figs:
@@ -494,14 +607,21 @@ def main():
     lines += ["## 注意", "",
               "- n が小さい結果は参考値。MAE の差が小さいときは結論を出さない。",
               "- IMU の条件は IMU のある試技（本人）だけで評価しているので、動画の条件と n が違う。",
-              "- 同じセッションのセットが学習とテストにまたがることはない。", ""]
+              "- 同じセッションのセットが学習とテストにまたがることはない。",
+              f"- RPE {args.eval_min_rpe:g} 未満は申告がぶれやすい（限界から遠いほど RIR の見積もりがずれる）ので、"
+              "主結果の評価から外している。",
+              f"- 「RPE {args.train_min_rpe:g} 以上だけで学習」したモデルは {args.train_min_rpe:g} 未満を予測しない"
+              f"（予測を {args.train_min_rpe:g}〜10 に収める）。", ""]
     if log:
         lines += ["## スキップした評価", ""] + [f"- {m}" for m in log] + [""]
     (out_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
     print(f"\n[OK] {out_dir}")
-    if not res.empty:
-        print(res[["scheme", "condition", "model", "n", "mae", "hit10"]].to_string(index=False))
+    if not res_main.empty:
+        print(f"主結果（学習: {label_train(MAIN_TRAIN)}／評価: {label_eval(main_eval)}）")
+        print(res_main[["scheme", "condition", "model", "n", "mae", "hit10"]].to_string(index=False))
+    if len(train_sets) > 1:
+        print("  学習データの範囲の比較は report.md の後半の表")
     for m in log:
         print(f"  [SKIP] {m}")
     print(f"  レポート: {out_dir / 'report.md'}")

@@ -266,3 +266,38 @@ def test_train_runs_end_to_end(tmp_path):
     pred = pd.read_csv(out / "predictions.csv")
     a = pred[pred["scheme"] == "A_within"]
     assert (a["fold"] == a["subject_id"] + "/" + a["session_id"]).all()
+    # RPE 5 未満が無いデータでは「全 RPE」だけで学習。RPE 6 未満も無ければ評価は全セットだけ
+    feats = synthetic_features()
+    assert set(res["train_set"]) == {"all"}
+    assert set(res["eval_set"]) == ({"all", "rpe>=6"} if (feats["rpe"] < 6).any() else {"all"})
+
+
+def test_train_compares_training_rpe_range(tmp_path):
+    """RPE 5 未満の軽いセットがあると「全 RPE」と「RPE 5 以上だけ」の2通りで学習し、同じテストで比べる"""
+    df = synthetic_features(seed=1)
+    rng = np.random.default_rng(3)
+    light = rng.random(len(df)) < 0.15                      # 15% を軽いセット（RPE 3〜4.5）にする
+    df.loc[light, "rpe"] = rng.choice([3.0, 3.5, 4.0, 4.5], light.sum())
+    df.loc[light, "pct_1rm"] = rng.uniform(45, 60, light.sum())
+    for c in ("pose_first_rep_mcv_bl", "imu_first_rep_mcv_mps"):
+        df.loc[light & df[c].notna(), c] += 0.25            # 軽いので速い
+    csv = tmp_path / "features_all.csv"
+    df.to_csv(csv, index=False)
+    r = subprocess.run([sys.executable, str(SCRIPT_DIR / "train_rpe_model.py"), "--input", str(csv),
+                        "--output-dir", str(tmp_path / "models"), "--kmax", "2"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    out = next((tmp_path / "models").iterdir())
+    res = pd.read_csv(out / "results.csv")
+    assert set(res["train_set"]) == {"all", "rpe>=5"}
+    assert set(res["eval_set"]) == {"all", "rpe>=6"}
+    # テストに使うセットは学習の範囲によらず同じ（n が一致する）
+    key = ["scheme", "condition", "model", "eval_set"]
+    n = res.pivot_table(index=key, columns="train_set", values="n")
+    assert (n["all"] == n["rpe>=5"]).all()
+    # RPE 5 以上だけで学習したモデルは 5 未満を予測しない
+    pred = pd.read_csv(out / "predictions.csv")
+    assert pred.loc[pred["train_set"] == "rpe>=5", "pred"].min() >= 5.0
+    curves = pd.read_csv(out / "curves.csv")
+    assert {"all", "rpe>=5"} <= set(curves["train_set"])
+    assert "学習データの範囲の比較" in (out / "report.md").read_text(encoding="utf-8")
