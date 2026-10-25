@@ -1,7 +1,7 @@
 使い方は docs\チートシート.txt を見る（詳細は CLAUDE.md §5）。
 すべてプロジェクトフォルダで実行する。
 
-cd C:\dev\claude\Projects\Research
+cd "G:\マイドライブ\大学院\M1\Projects\Research"
 
 # 1. セッションをセット単位に分割（動画は data\_sessions\session_*\ 直下に置いておく。重量・回数は受信時に入力済み）
 python scripts\split_session.py --subject S001 --session SES006

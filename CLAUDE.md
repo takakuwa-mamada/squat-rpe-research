@@ -4,7 +4,7 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
 `docs/研究コンテキスト.md` にある。設計判断、論文・発表資料、実験計画に関わる作業の前には必ず読むこと。
 
 最終更新: 2026-10-15（9/18 の計測は別人物 → S002 に分離、本人の初データ S001/SES005、IMU レップ検出の修正、受信時に重量・回数を入力、
-プロジェクトを OneDrive から `C:\dev\claude\Projects\Research` に移動、data/ を git 履歴から削除）
+data/ を git 履歴から削除。2026-10-25 にプロジェクトを Google ドライブ `G:\マイドライブ\大学院\M1\Projects\Research` に移動）
 （前回: 2026-09-27 方針転換: 汎用モデル先行・協力者6人は動画のみ・正面撮影）
 
 ---
@@ -87,7 +87,7 @@ Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理�
 ## 4. ディレクトリ
 
 ```
-C:\dev\claude\Projects\Research\   （2026-10-15 に OneDrive の「大学院研究」から移動）
+G:\マイドライブ\大学院\M1\Projects\Research\   （OneDrive「大学院研究」→ C:\dev\claude\Projects\Research → 2026-10-25 に Google ドライブへ）
 ├─ CLAUDE.md, README.md, requirements.txt, .gitignore
 ├─ cheat_sheet.txt           ユーザーが自分用に編集したチートシート（上書きしない）
 ├─ scripts/                  Python 一式（すべてプロジェクトルートから実行）
@@ -166,8 +166,10 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 7. 協力者の動画は **LINE 経由だと撮影日時が消える** → 撮影順がファイル名順になる（ガイドで Google Drive を指定済み）。
 8. バッテリー 120 mAh は Wi-Fi 常時送信で 30〜60 分。
 9. `mediapipe==0.10.14` 固定（比較用のみ）。OpenH264 の警告は無害。
-10. 2026-10-15 に OneDrive の外（`C:\dev\claude\Projects\Research`、ASCII のパス）へ移動した。OneDrive のロック問題は無くなったが、
-    **`data/` は git にも OneDrive にも入っていない（このPCにしか無い）**。計測データと動画は別にバックアップする（外付けドライブ・クラウドなど）。
+10. 2026-10-25 から Google ドライブ（パソコン版 Google ドライブの G:）上にある。`data/` もクラウドに同期されるのでバックアップになる。
+    ただし同期フォルダなので、①同期中のファイルがロックされることがある、②`.git` は同期の衝突で壊れることがある（2台の PC で同時に触らない。
+    おかしくなったら GitHub から clone し直す）、③パスに日本語が入る（OpenCV の imread/imwrite は日本語パスに弱い。動画の読み書きで失敗したら疑う）。
+    Cowork の bash からは G: が見えないので、Cowork ではファイル操作だけ・git はユーザーか Claude Code が行う。
 11. `docs/研究計画書.pdf` はパスワード保護。本文は `docs/研究計画書_source.js`。
 12. `docs/計測チェックリスト.docx/.pdf` は 2026-09-27 に正面撮影版へ作り直した（生成: `node docs\計測チェックリスト_source.js`、docx は npm で別途）。旧版は `_archive/計測チェックリスト_旧_側面撮影.*`。
 13. Bash ツールのヒアドキュメントで `\n` などのバックスラッシュが潰れることがある → 置換スクリプトはファイルに書いてから実行する。
