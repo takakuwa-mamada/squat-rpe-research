@@ -420,3 +420,109 @@ def test_train_excludes_unusable_sets(tmp_path):
     assert ids(bad_vid[:1]) <= got(pred[pred["condition"] == "imu_all"]) # IMU の条件には残る
     report = (out / "report.md").read_text(encoding="utf-8")
     assert "学習から外したセット" in report and "足元が画面の下端で切れている" in report
+
+
+# ---------------------------------------------------------------------------
+# 切っていない動画・申告より多いしゃがみ・動画と IMU の時刻合わせ（2026-10-30）
+# ---------------------------------------------------------------------------
+def with_waiting_near_rack(kp, pre_s=20.0, post_s=6.0, fs=30.0):
+    """切っていない動画: セットの前後に、ラックの近く（カメラに近い）で立っている時間を足す。
+    近いので大きく写る（肩が高く、足首は画面の下端）"""
+    first = kp.iloc[0]
+    rng = np.random.default_rng(5)
+
+    def near(n):
+        rows = {}
+        for name in COCO:
+            rows[f"{name}_x"] = 0.5 + (first[f"{name}_x"] - 0.5) * 1.88 + rng.normal(0, 0.001, n)
+            rows[f"{name}_y"] = 0.15 + (first[f"{name}_y"] - 0.25) * 1.88 + rng.normal(0, 0.001, n)
+            rows[f"{name}_conf"] = np.full(n, 0.95)
+        return pd.DataFrame(rows)
+
+    out = pd.concat([near(int(pre_s * fs)), kp.drop(columns=["frame", "time_s"]), near(int(post_s * fs))],
+                    ignore_index=True)
+    out.insert(0, "time_s", np.arange(len(out)) / fs)
+    out.insert(0, "frame", np.arange(len(out)))
+    return out
+
+
+def test_pose_untrimmed_video_uses_only_the_set():
+    """切っていない動画（協力者・切り忘れ）でも、セットの区間だけで体の大きさ・足元・レップの区切りを出す
+    （2026-10-24 set04 では 1 回目が待ち時間まで伸び、骨格の速度低下が 58 % になっていた）"""
+    kp, _ = make_keypoints(n_reps=5)
+    a = ef.compute_pose_features(kp, 720, 1280, 30.0, view="front", expected_reps=5)
+    b = ef.compute_pose_features(with_waiting_near_rack(kp), 720, 1280, 30.0, view="front", expected_reps=5)
+    assert b["pose_n_reps_detected"] == 5
+    assert max(r["descent_s"] for r in b["_pose_reps"]) < 2.0          # 1 回目が待ち時間まで伸びない
+    assert abs(b["pose_first_rep_mcv_bl"] / a["pose_first_rep_mcv_bl"] - 1) < 0.05
+    assert abs(b["pose_velocity_loss_pct"] - a["pose_velocity_loss_pct"]) < 3
+    assert b["pose_ankle_y_max_norm"] < 0.97                            # 足元の確認もセットの区間だけ
+    assert abs(b["_pose_reps"][0]["bottom_t_s"] - a["_pose_reps"][0]["bottom_t_s"] - 20.0) < 0.1
+
+
+def test_pose_keeps_first_reps_when_more_than_reported():
+    """申告より多くしゃがんでいたら、時刻順に最初の N 回を残す（RPE 10 で潰れた最後のレップを外す）"""
+    kp, _ = make_keypoints(n_reps=6)
+    full = ef.compute_pose_features(kp, 720, 1280, 30.0, view="front")
+    f = ef.compute_pose_features(kp, 720, 1280, 30.0, view="front", expected_reps=5)
+    assert f["pose_n_reps_detected"] == 5
+    assert [r["bottom_t_s"] for r in f["_pose_reps"]] == [r["bottom_t_s"] for r in full["_pose_reps"][:5]]
+
+
+def imu_with_walkout_and_rack(n_reps=5, lead=6.0, tail=4.0):
+    """IMU（SPACE〜SPACE）: レップの前後に、歩き出し・ラックインの小さな上下動（4 cm）が入る"""
+    imu, v_true, asc = make_imu(n_reps=n_reps, lead=lead, tail=tail)
+    t = imu["timestamp_ms"].to_numpy() / 1000.0
+    bump = lambda t0: 0.04 * np.exp(-((t - t0) / 0.3) ** 2)
+    pos = bump(2.0) + bump(t[-1] - 1.5)
+    imu["az_g"] += np.gradient(np.gradient(pos, t), t) / G
+    return imu, asc
+
+
+def test_sync_video_imu_and_take_imu_reps_from_video(tmp_path):
+    """切った動画（1 回目の 1 秒前から）と IMU（6 秒前から）のずれ 5 秒を波形で求め、
+    IMU のレップを動画のレップ区間で取る。ファイルの日時は使わない（LINE で保存した動画でもよい）"""
+    kp, asc = make_keypoints(n_reps=5, lead=1.0, tail=1.0)
+    imu, _ = imu_with_walkout_and_rack()
+    sync = ef.sync_video_imu(kp, 720, 1280, 30.0, imu)
+    assert abs(sync["sync_offset_s"] - 5.0) < 0.05
+    assert sync["sync_r"] >= ef.SYNC_R_MIN and sync["sync_margin"] >= ef.SYNC_MARGIN_MIN
+
+    # 1 試技の通し: 骨格 → 時刻合わせ → IMU のレップは動画の区間で
+    (tmp_path / "pose").mkdir()
+    (tmp_path / "imu").mkdir()
+    kp.to_csv(tmp_path / "pose" / "set01_yolo_keypoints.csv", index=False)
+    (tmp_path / "pose" / "set01_yolo_info.json").write_text(
+        json.dumps({"width": 720, "height": 1280, "fps": 30.0}), encoding="utf-8")
+    imu.to_csv(tmp_path / "imu" / "set01_BAR.csv", index=False)
+    meta = {"session_id": "SES001", "subject_id": "S999", "date": "2026-11-01",
+            "sets": [{"set_no": 1, "reps_completed": 5, "rpe": 8, "weight_kg": 100}]}
+    (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    f = ef.extract_one_trial(tmp_path / "imu" / "set01_BAR.csv", tmp_path / "pose" / "set01_yolo_keypoints.csv",
+                             tmp_path / "meta.json", 1)
+    assert f["imu_rep_source"] == "video" and f["imu_n_reps_detected"] == 5
+    assert abs(f["sync_offset_s"] - 5.0) < 0.05
+    true_mcv = 0.45 / asc[0]
+    assert abs(f["imu_first_rep_mcv_mps"] - true_mcv) / true_mcv < 0.15
+    # 各レップの IMU の上昇ピークは、動画のそのレップの区間（IMU の時刻に直したもの）の中にある
+    for rv, ri in zip(f["_pose_reps"], f["_imu_reps"]):
+        assert rv["bottom_t_s"] + 5.0 - 0.3 <= ri["peak_t_s"] <= rv["end_t_s"] + 5.0 + 0.3
+
+
+def test_imu_falls_back_when_video_does_not_match():
+    """動画が別のセットのもの（回数・リズムが違う）なら時刻合わせを使わず、IMU だけで数える"""
+    kp, _ = make_keypoints(n_reps=3, lead=1.0, tail=1.0, descent=0.8, rest=2.0)
+    imu, _ = imu_with_walkout_and_rack(n_reps=5)
+    sync = ef.sync_video_imu(kp, 720, 1280, 30.0, imu)
+    ok = (sync.get("sync_r") or 0) >= ef.SYNC_R_MIN and (sync.get("sync_margin") or 0) >= ef.SYNC_MARGIN_MIN
+    assert not ok
+
+
+def test_quality_notes_failed_sync_without_excluding():
+    """時刻合わせが不確かで IMU だけで数えたセットは、要確認として出すが学習からは外さない"""
+    from quality_checks import check_set, exclusion_reasons
+    row = {"rpe": 8, "weight_kg": 90, "reps_completed": 5, "modality": "imu+video", "pose_available": True,
+           "pose_n_reps_detected": 5, "pose_first_rep_mcv_bl": 0.4, "imu_n_reps_detected": 5,
+           "imu_first_rep_mcv_mps": 0.5, "imu_rep_source": "imu", "sync_r": 0.42, "sync_margin": 0.01}
+    assert any("時刻合わせ" in i.text and not i.exclude for i in check_set(row))
+    assert exclusion_reasons(row) == {"imu": [], "video": []}

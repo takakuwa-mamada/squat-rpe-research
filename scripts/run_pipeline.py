@@ -82,7 +82,8 @@ def quality_report(subject=None):
     df["excluded_from"] = [excluded_from(r) for r in recs]
     cols = [c for c in ["subject_id", "session_id", "date", "set_no", "modality", "weight_kg",
                         "reps_completed", "rpe", "imu_n_reps_detected", "pose_n_reps_detected",
-                        "imu_first_rep_mcv_mps", "pose_first_rep_mcv_bl", "issues", "excluded_from"]
+                        "imu_first_rep_mcv_mps", "pose_first_rep_mcv_bl", "imu_rep_source", "sync_offset_s",
+                        "sync_r", "sync_margin", "issues", "excluded_from"]
             if c in df.columns]
     df[cols].to_csv(QUALITY_CSV, index=False, encoding="utf-8-sig")
 

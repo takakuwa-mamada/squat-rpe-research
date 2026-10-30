@@ -20,6 +20,9 @@
            膝の開き（膝の内側への入り）、腰の横ブレ、肩・腰の傾き、体幹の側方傾斜、
            1レップ目 → 最終レップの変化（疲労によるフォームの崩れ）
            距離は「立位の肩〜足首の高さ」= 1 BL（body length）で正規化する
+           切っていない動画でも、しゃがんだ位置から決めたセットの区間だけで計算する
+   sync_*  動画と IMU の時刻のずれ（波形の相互相関）。合えば IMU のレップは動画のレップ区間で取る
+           （imu_rep_source = video）。合わなければ IMU だけで数える（= imu）
 
  使い方:
    python scripts\\extract_features.py                    # data/ 配下を全自動
@@ -330,12 +333,14 @@ def concentric_phase(v, a, p):
 # ===========================================================================
 # IMU 特徴量抽出
 # ===========================================================================
-def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
+def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None) -> dict:
     """
     IMU CSV (timestamp_ms, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps)
     から特徴量を計算する。
 
     expected_reps: meta.json の reps_completed（分かっていれば検出を補正する）
+    rep_windows  : 動画で数えたレップの区間を IMU の時刻に直したもの [(始まり, 底, 終わり) [s], ...]。
+                   あれば IMU のレップはこの区間で取る（時刻合わせ: sync_video_imu）。無ければ IMU だけで数える
     注意: 3軸合成加速度を使うので向きの誤差には強いが、水平方向の加速度が大きいと誤差になる。
           roll/pitch はジャイロの単純積分で
           ドリフトを含むため、学習には使わない（train_rpe_model.py で除外）。
@@ -356,7 +361,12 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
 
     # レップを選び、レップごとに「ロックアウトで速度0・変位0」でドリフトを解き直す
     # （挙上の直後はすぐラックへ歩くので、ロックアウト後に静止区間が無いことが多い）
-    rep_idx = select_reps(v_hp, fs, dt_med, expected_reps=expected_reps)
+    if rep_windows:
+        rep_idx = reps_from_video(v_hp, t, rep_windows, fs)
+        rep_source = "video"
+    else:
+        rep_idx = select_reps(v_hp, fs, dt_med, expected_reps=expected_reps)
+        rep_source = "imu"
     v = v.copy()
     peaks, prev_T = [], None
     for ds, dmin, pk in rep_idx:
@@ -445,6 +455,7 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
         "imu_mean_velocity_down_mps": round(mean_v_down, 4),
 
         "imu_n_reps_detected":         n_reps,
+        "imu_rep_source":              rep_source,   # video = 動画のレップ区間で取った / imu = IMU だけで数えた
         "imu_first_rep_peak_v_mps":    _r(first("peak_v")),
         "imu_last_rep_peak_v_mps":     _r(last("peak_v")),
         "imu_mean_rep_peak_v_mps":     _r(mean("peak_v")),
@@ -470,6 +481,109 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None) -> dict:
 
         "_imu_reps": [{k: round(val, 4) for k, val in r.items()} for r in reps],
     }
+
+
+# ===========================================================================
+# 動画と IMU の時刻合わせ（波形の相互相関）
+#   動画（肩の上下の速度）と IMU（バーの上下の速度）の波形を重ねて、ずれを求める。
+#   ファイルの撮影日時や、動画をどこで切ったかには依らない（LINE で保存した動画でもよい）。
+#   合えば、動画で数えたレップの区間で IMU のレップを取る（IMU だけだと、ラックアウト直後の
+#   1 回目を取りこぼしたり、ラックインを 1 回と数えることがある。2026-10-20 set02・10-29 set01）。
+# ===========================================================================
+SYNC_RATE_HZ = 50.0      # 重ねるときの時間の刻み [Hz]
+SYNC_MIN_OVERLAP = 0.6   # 重なりの最低割合（短い方の長さに対して）
+SYNC_R_MIN = 0.6         # 相関がこれ未満なら合わなかったとみなし、IMU だけでレップを数える
+SYNC_MARGIN_MIN = 0.05   # 1 秒以上離れた別のずれでの相関との差がこれ未満なら、1 レップずれの恐れがあるので使わない
+SYNC_PAD_S = 0.3         # 動画のレップ区間を IMU に写すときの余裕 [s]
+
+
+def _shoulder_up_velocity(kp_df, width, height, fs):
+    """肩の上向きの速度（ピクセル/秒。倍率は相関に関係しない）。時刻は動画の先頭からの秒"""
+    pts = _load_points(kp_df, width, height, fs)
+    sh_y = pd.Series(_nanmean([pts["left_shoulder"][1], pts["right_shoulder"][1]]))
+    sh_y = sh_y.interpolate(limit_direction="both").to_numpy()
+    if np.all(np.isnan(sh_y)):
+        return None, None
+    return np.arange(len(sh_y)) / fs, -np.gradient(sh_y) * fs
+
+
+def estimate_offset(t_a, v_a, t_b, v_b, rate=SYNC_RATE_HZ, min_overlap=SYNC_MIN_OVERLAP) -> dict:
+    """
+    波形 a（動画）を b（IMU）の上で滑らせ、相関がいちばん高いずれを返す。
+      sync_offset_s : b の時刻 = a の時刻 + これ
+      sync_r        : そのずれでの相関係数
+      sync_margin   : 1 秒以上離れたずれでの最大の相関との差（小さいと 1 レップずれの恐れ）
+    """
+    ga = np.arange(t_a[0], t_a[-1], 1.0 / rate)
+    gb = np.arange(t_b[0], t_b[-1], 1.0 / rate)
+    if len(ga) < rate or len(gb) < rate:
+        return {}
+    a, b = np.interp(ga, t_a, v_a), np.interp(gb, t_b, v_b)
+    na, nb = len(a), len(b)
+    m_min = max(int(rate), int(min_overlap * min(na, nb)))
+    lags, rs = [], []
+    for k in range(-(na - m_min), nb - m_min + 1):
+        j0, j1 = max(0, -k), min(na, nb - k)
+        if j1 - j0 < m_min:
+            continue
+        x, y = a[j0:j1], b[j0 + k:j1 + k]
+        sx, sy = x.std(), y.std()
+        if sx < 1e-9 or sy < 1e-9:
+            continue
+        lags.append(k)
+        rs.append(float(np.mean((x - x.mean()) * (y - y.mean())) / (sx * sy)))
+    if not rs:
+        return {}
+    lags, rs = np.array(lags), np.array(rs)
+    i = int(np.argmax(rs))
+    far = np.abs(lags - lags[i]) > rate                 # 1 秒以上離れたずれ
+    second = float(np.max(rs[far])) if far.any() else -1.0
+    return {"sync_offset_s": round(float(gb[0] + lags[i] / rate - ga[0]), 3),
+            "sync_r": round(float(rs[i]), 3),
+            "sync_margin": round(float(rs[i] - second), 3)}
+
+
+def sync_video_imu(kp_df, width, height, fps, imu_df, t_range=None) -> dict:
+    """
+    動画と IMU のずれ（IMU の時刻 = 動画の時刻 + sync_offset_s）と、その確からしさ。
+    t_range: 動画のうち使う区間 [s]（セットの区間。切っていない動画の歩き出し・ラックインを入れない）
+    """
+    if kp_df is None or len(kp_df) < 10 or not width or not height or imu_df is None or len(imu_df) < 20:
+        return {}
+    fs_v = _pose_fs(kp_df, fps)
+    t_v, v_v = _shoulder_up_velocity(kp_df, width, height, fs_v)
+    if t_v is None:
+        return {}
+    if t_range is not None and None not in t_range:
+        sel = (t_v >= t_range[0]) & (t_v <= t_range[1])
+        if sel.sum() >= 10:
+            t_v, v_v = t_v[sel], v_v[sel]
+    t_i = imu_df["timestamp_ms"].to_numpy() / 1000.0
+    dt = float(np.median(np.diff(t_i)))
+    _, _, _, _, v_hp, _ = imu_vertical_velocity(imu_df, 1.0 / dt if dt > 0 else 100.0, dt)
+    return estimate_offset(t_v, v_v, t_i, v_hp)
+
+
+def reps_from_video(v_hp, t, windows, fs):
+    """
+    動画のレップ区間（IMU の時刻に直した (始まり, 底, 終わり) [s]）から IMU のレップを取る。
+    戻り値は select_reps と同じ [(下降の始まり, 下降のピーク, 上昇のピーク), ...]。
+    IMU の記録からはみ出すレップ（送信が途中で止まったなど）は入れない。
+    """
+    n, pad = len(t), max(1, int(SYNC_PAD_S * fs))
+    out = []
+    for ts, tb, te in windows:
+        i_s, i_b, i_e = (int(np.searchsorted(t, x)) for x in (ts, tb, te))
+        if i_s <= 0 or i_e >= n - 1:
+            continue
+        lo, mid, hi = max(0, i_s - pad), min(n - 1, i_b + pad), min(n - 1, i_e + pad)
+        dmin = lo + int(np.argmin(v_hp[lo:mid + 1]))
+        pk = dmin + int(np.argmax(v_hp[dmin:hi + 1]))
+        ds = dmin
+        while ds > lo and v_hp[ds - 1] < -0.03:
+            ds -= 1
+        out.append((ds, dmin, pk))
+    return out
 
 
 # ===========================================================================
@@ -515,6 +629,12 @@ def _tilt_deg(xl, yl, xr, yr):
 # ===========================================================================
 # 骨格: レップ分割
 # ===========================================================================
+SET_PRE_S = 4.0        # 1 回目の底より前に見る長さ [s]。しゃがみ始めを探すのも底からこの範囲まで
+SET_POST_S = 5.0       # 最後の底より後に見る長さ [s]。立ち上がりを探すのも底からこの範囲まで
+SET_CORE_PRE_S = 1.5   # 体の大きさ・立位の高さ・足元を測る区間: 1 回目の底のこの秒数前から
+SET_CORE_POST_S = 2.0  # 〃: 最後の底のこの秒数後まで（レップの間のロックアウトで立位を測る）
+
+
 def detect_pose_reps(depth, fs, expected_reps=None):
     """
     depth: 立位からの肩の下がり量 [BL]（下が正）
@@ -522,6 +642,11 @@ def detect_pose_reps(depth, fs, expected_reps=None):
 
     ラックアウトの歩き出しでは肩はほとんど沈まないので、
     沈み込みの大きさ（prominence）でしゃがみ動作だけを拾う。
+    申告より多く見つかったときは、時刻順に最初の N 回を残す
+    （RPE 10 で潰れたレップ = 最後の余分な沈み込みを外す。2026-10-30 までは沈み込みの大きい順だった）。
+    しゃがみ始め・立ち上がりは底の前 SET_PRE_S 秒・後 SET_POST_S 秒の中で探す
+    （切っていない動画で、ラックアウト前の待ち時間まで 1 回目に入れないため。2026-10-24 set04 で 27 秒の「1 回目」になった）。
+    立位（0）より上は基準にしない（ラックインで前に歩いて肩が高く写っても、ロックアウトで区切る）。
     """
     d = pd.Series(depth).interpolate(limit_direction="both").to_numpy()
     if np.all(np.isnan(d)):
@@ -533,15 +658,15 @@ def detect_pose_reps(depth, fs, expected_reps=None):
     keep = prom >= max(0.08, 0.5 * float(np.max(prom)))
     peaks, prom = peaks[keep], prom[keep]
     if expected_reps and len(peaks) > expected_reps:
-        idx = np.argsort(prom)[::-1][:expected_reps]
-        peaks = np.sort(peaks[idx])
+        peaks = peaks[:int(expected_reps)]
 
     reps = []
+    pre, post = int(SET_PRE_S * fs), int(SET_POST_S * fs)
     bounds = [0] + list(peaks) + [len(d) - 1]
     for k, b in enumerate(peaks):
-        lo, hi = bounds[k], bounds[k + 2]
-        base_before = float(np.min(d[lo:b + 1]))
-        base_after  = float(np.min(d[b:hi + 1]))
+        lo, hi = max(bounds[k], b - pre), min(bounds[k + 2], b + post)
+        base_before = max(0.0, float(np.min(d[lo:b + 1])))
+        base_after  = max(0.0, float(np.min(d[b:hi + 1])))
         thr_b = base_before + 0.1 * (d[b] - base_before)
         thr_a = base_after  + 0.1 * (d[b] - base_after)
         s = b
@@ -582,6 +707,40 @@ def _pose_empty(reason, n_frames=0):
     return d
 
 
+def _pose_fs(kp_df, fps) -> float:
+    """動画のフレームレート（info に無ければ time_s の間隔から）"""
+    if fps and fps > 0:
+        return float(fps)
+    t = kp_df["time_s"].to_numpy() if "time_s" in kp_df else np.array([])
+    dt = float(np.median(np.diff(t))) if len(t) > 1 else 0.0
+    return 1.0 / dt if dt > 0 else 30.0
+
+
+def _set_region(kp_df, width, height, fs, expected_reps=None):
+    """
+    セットの区間をフレーム番号で返す: (i0, i1, c0, c1)
+      [i0, i1) レップの区切りを探す区間: 1 回目の底の SET_PRE_S 秒前 〜 最後の底の SET_POST_S 秒後
+      [c0, c1) 体の大きさ・立位の高さ・足元を測る区間: 1 回目の底の SET_CORE_PRE_S 秒前 〜 最後の底の SET_CORE_POST_S 秒後
+    切っていない動画（協力者・切り忘れ）で、ラックアウト前・ラックイン後（ラックの近くでカメラに近く、
+    大きく写る）を入れないため。底が見つからなければ動画全体。本人の切った動画ではほぼ動画全体になる。
+    """
+    n = len(kp_df)
+    whole = (0, n, 0, n)
+    pts = _load_points(kp_df, width, height, fs)
+    sh_y = _nanmean([pts["left_shoulder"][1], pts["right_shoulder"][1]])
+    an_y = _nanmean([pts["left_ankle"][1], pts["right_ankle"][1]])
+    body_len = _nanstat(lambda a: np.percentile(a, 95), an_y - sh_y)
+    if np.isnan(body_len) or body_len < 50:
+        return whole
+    depth = (sh_y - _nanstat(lambda a: np.percentile(a, 5), sh_y)) / body_len
+    reps = detect_pose_reps(depth, fs, expected_reps=expected_reps)
+    if not reps:
+        return whole
+    b0, b1 = reps[0][1], reps[-1][1]
+    return (max(0, b0 - int(SET_PRE_S * fs)), min(n, b1 + int(SET_POST_S * fs) + 1),
+            max(0, b0 - int(SET_CORE_PRE_S * fs)), min(n, b1 + int(SET_CORE_POST_S * fs) + 1))
+
+
 def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None, fps=None,
                           view="front", expected_reps=None, height_cm=None) -> dict:
     """
@@ -589,19 +748,34 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
 
     view      : "front"（正面）なら膝の開き・横ブレ・傾きも出す。それ以外は共通の特徴のみ
     height_cm : 身長が分かれば BL/s を m/s に換算した推定値も出す
+    まず動画全体でしゃがんだ位置（底）を探してセットの区間を決め、その区間だけで計算する（_set_region）。
+    レップの時刻（_pose_reps）は動画の先頭からの秒。
     """
     if kp_df is None or len(kp_df) == 0:
         return _pose_empty("no keypoints")
     n = len(kp_df)
     if not width or not height:
         return _pose_empty("video size unknown", n)
+    fs = _pose_fs(kp_df, fps)
+    i0, i1, c0, c1 = _set_region(kp_df, width, height, fs, expected_reps)
+    out = _pose_core(kp_df.iloc[i0:i1].reset_index(drop=True), width, height, fs, view=view,
+                     expected_reps=expected_reps, height_cm=height_cm, t0=i0 / fs, core=(c0 - i0, c1 - i0))
+    out["pose_n_frames"] = int(n)
+    out["pose_set_start_s"] = _r(i0 / fs, 3)
+    out["pose_set_end_s"] = _r(i1 / fs, 3)
+    return out
 
-    if not fps or fps <= 0:
-        dt = np.median(np.diff(kp_df["time_s"].to_numpy()))
-        fps = 1.0 / dt if dt > 0 else 30.0
-    fs = float(fps)
 
-    # 品質
+def _pose_core(kp_df: pd.DataFrame, width, height, fs, view="front", expected_reps=None,
+               height_cm=None, t0=0.0, core=None) -> dict:
+    """
+    compute_pose_features の本体。kp_df はセットの区間だけ、t0 はその始まりの動画上の時刻 [s]、
+    core は体の大きさ・立位の高さ・足元を測る区間（kp_df の中のフレーム番号 (始まり, 終わり)）
+    """
+    n = len(kp_df)
+
+    # 品質（足元の確認はセットの芯の区間だけ。ラックの近くで大きく写る時間を入れない）
+    cs = slice(*core) if core else slice(None)
     valid = kp_df["left_hip_x"].notna().to_numpy()
     conf = np.vstack([kp_df[f"{p}_conf"].to_numpy(dtype=float) for p in POSE_POINTS])
     vis = conf.mean(axis=0)[valid]
@@ -613,8 +787,8 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
         "pose_key_visibility_min":  _r(vis.min() if len(vis) else np.nan),
         # 全身が画面に収まっているか（足首・頭が画面端で切れていない）
         "pose_ankle_y_max_norm":    _r(np.nanpercentile(
-            kp_df[["left_ankle_y", "right_ankle_y"]].to_numpy(dtype=float), 99)
-            if valid.any() else np.nan),
+            kp_df[["left_ankle_y", "right_ankle_y"]].to_numpy(dtype=float)[cs], 99)
+            if valid[cs].any() else np.nan),
     }
 
     pts = _load_points(kp_df, width, height, fs)
@@ -628,11 +802,11 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
     kn_y = _nanmean([lky, rky])
     an_x, an_y = _nanmean([lax, rax]), _nanmean([lay, ray])
 
-    # 体の大きさ: 立位の肩〜足首の高さ（ピクセル）= 1 BL
-    body_len = _nanstat(lambda a: np.percentile(a, 95), an_y - sh_y)
+    # 体の大きさ: 立位の肩〜足首の高さ（ピクセル）= 1 BL（セットの芯の区間で測る）
+    body_len = _nanstat(lambda a: np.percentile(a, 95), (an_y - sh_y)[cs])
     quality["pose_body_len_px"] = _r(body_len, 1)
     # 肩幅 / 体の高さ: 正面なら 0.2 以上、真横なら 0.1 未満になる（撮影方向の確認用）
-    quality["pose_shoulder_width_bl"] = _r(_nanstat(np.median, np.abs(lsx - rsx)) / body_len
+    quality["pose_shoulder_width_bl"] = _r(_nanstat(np.median, np.abs(lsx - rsx)[cs]) / body_len
                                            if body_len and not np.isnan(body_len) else np.nan, 3)
     if np.isnan(body_len) or body_len < 50:
         d = _pose_empty("body too small or not detected", n)
@@ -640,8 +814,8 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
         d["pose_available"] = False
         return d
 
-    # 肩の沈み込み（≒バーの鉛直位置）と上向き速度
-    stand_y = _nanstat(lambda a: np.percentile(a, 5), sh_y)
+    # 肩の沈み込み（≒バーの鉛直位置）と上向き速度（立位の高さもセットの芯の区間で測る）
+    stand_y = _nanstat(lambda a: np.percentile(a, 5), sh_y[cs])
     depth = (sh_y - stand_y) / body_len                 # [BL] 下が正
     v_up = -np.gradient(depth) * fs                     # [BL/s] 上が正
 
@@ -678,7 +852,7 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
         sticking = (float(np.min(sv[vp[0]:vp[-1] + 1]) / np.max(sv))
                     if len(vp) >= 2 and np.max(sv) > 0 else 1.0)
         rep = {
-            "start_t_s": s / fs, "bottom_t_s": b / fs, "end_t_s": e / fs,
+            "start_t_s": t0 + s / fs, "bottom_t_s": t0 + b / fs, "end_t_s": t0 + e / fs,
             "descent_s": (b - s) / fs, "ascent_s": (e - b) / fs, "pause_s": (r - l) / fs,
             "mcv_bl": _nanstat(np.mean, seg_v), "peak_v_bl": _nanstat(np.max, seg_v),
             "depth_bl": float(depth[b]),
@@ -808,12 +982,7 @@ def extract_one_trial(imu_csv: Optional[Path], kp_csv: Optional[Path],
     except (TypeError, ValueError):
         expected_reps = None
 
-    # IMU（あれば）
-    imu_feat = {}
-    if imu_csv is not None and imu_csv.exists():
-        imu_feat = compute_imu_features(pd.read_csv(imu_csv), expected_reps=expected_reps)
-
-    # 骨格（あれば）
+    # 骨格（あれば）を先に計算する（IMU のレップを動画のレップ区間で取るため）
     view = set_meta.get("camera_view") or meta.get("camera_view") or "front"
     kp_df = None
     if kp_csv is not None and kp_csv.exists():
@@ -825,6 +994,21 @@ def extract_one_trial(imu_csv: Optional[Path], kp_csv: Optional[Path],
     pose_feat = compute_pose_features(kp_df, w, h, fps, view=view,
                                       expected_reps=expected_reps,
                                       height_cm=profile.get("height_cm"))
+
+    # IMU（あれば）: 動画の回数が申告どおりで、時刻が合えば、動画のレップ区間で IMU のレップを取る
+    imu_feat = {}
+    if imu_csv is not None and imu_csv.exists():
+        imu_df = pd.read_csv(imu_csv)
+        sync, windows = {}, None
+        pose_reps = pose_feat.get("_pose_reps") or []
+        if pose_feat.get("pose_available") and pose_reps and (not expected_reps or len(pose_reps) == expected_reps):
+            sync = sync_video_imu(kp_df, w, h, fps, imu_df,
+                                  t_range=(pose_feat.get("pose_set_start_s"), pose_feat.get("pose_set_end_s")))
+            if (sync.get("sync_r") or 0) >= SYNC_R_MIN and (sync.get("sync_margin") or 0) >= SYNC_MARGIN_MIN:
+                off = sync["sync_offset_s"]
+                windows = [(r["start_t_s"] + off, r["bottom_t_s"] + off, r["end_t_s"] + off) for r in pose_reps]
+        imu_feat = compute_imu_features(imu_df, expected_reps=expected_reps, rep_windows=windows)
+        imu_feat.update(sync)
 
     weight = set_meta.get("weight_kg")
     one_rm = profile.get("squat_1rm_kg")
