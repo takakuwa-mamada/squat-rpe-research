@@ -333,34 +333,65 @@ def concentric_phase(v, a, p):
 # ===========================================================================
 # IMU 特徴量抽出
 # ===========================================================================
-def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None) -> dict:
-    """
-    IMU CSV (timestamp_ms, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps)
-    から特徴量を計算する。
+IMU_COLS = ["ax_g", "ay_g", "az_g", "gx_dps", "gy_dps", "gz_dps"]
 
-    expected_reps: meta.json の reps_completed（分かっていれば検出を補正する）
-    rep_windows  : 動画で数えたレップの区間を IMU の時刻に直したもの [(始まり, 底, 終わり) [s], ...]。
-                   あれば IMU のレップはこの区間で取る（時刻合わせ: sync_video_imu）。無ければ IMU だけで数える
-    注意: 3軸合成加速度を使うので向きの誤差には強いが、水平方向の加速度が大きいと誤差になる。
-          roll/pitch はジャイロの単純積分で
-          ドリフトを含むため、学習には使わない（train_rpe_model.py で除外）。
-    """
-    if len(imu_df) < 20:
-        return {"imu_n_samples": len(imu_df), "imu_error": "too few samples"}
 
+def imu_on_device_clock(imu_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    IMU を M5 の時計（boot_ms）で等間隔に並べ直す（2026-10-31）。
+    timestamp_ms の基準（SPACE からの PC の時刻）は変えない: boot_ms → 受信時刻を直線で対応づける。
+
+    受信時刻は Wi-Fi でまとめて届くので間隔が揺れる（見かけ 85〜111 Hz）。その中央値を時間刻みにすると
+    速度がセットごとに −15〜+11 % ずれていた。M5 は 10 ms ごとに測るが、2 秒ごとに約 45 ms 止まって
+    1〜2 ms 間隔で追いつくので、boot_ms の時刻で等間隔の格子に線形補間する（送信の欠けも埋まる）。
+    boot_ms が無い（合成データ）か単調に増えていない（途中で再起動）ときはそのまま返す。
+    """
+    if "boot_ms" not in imu_df.columns or len(imu_df) < 20:
+        return imu_df
+    b = imu_df["boot_ms"].to_numpy(dtype=float) / 1000.0
+    if not np.all(np.diff(b) > 0):
+        return imu_df
+    tp = imu_df["timestamp_ms"].to_numpy(dtype=float) / 1000.0
+    slope, icpt = np.polyfit(b, tp, 1)
+    if abs(slope - 1.0) > 0.01:     # 時計の進みの差は 0.1 % もない。外れたら受信が大きく止まった
+        slope, icpt = 1.0, float(np.median(tp - b))
+    dt = float(np.median(np.diff(b)))
+    grid = np.arange(b[0], b[-1] + dt / 2, dt)
+    out = pd.DataFrame({"timestamp_ms": (icpt + slope * grid) * 1000.0})
+    for c in IMU_COLS:
+        out[c] = np.interp(grid, b, imu_df[c].to_numpy(dtype=float))
+    return out
+
+
+def imu_recv_rate_hz(imu_df: pd.DataFrame) -> float:
+    """受信レート [Hz] = 受け取ったサンプル数 / M5 の時計での長さ（送信の欠けがあると 100 Hz より下がる）"""
+    if "boot_ms" in imu_df.columns and len(imu_df) >= 2:
+        span = (float(imu_df["boot_ms"].iloc[-1]) - float(imu_df["boot_ms"].iloc[0])) / 1000.0
+        if span > 0:
+            return (len(imu_df) - 1) / span
+    dt = float(np.median(np.diff(imu_df["timestamp_ms"].to_numpy() / 1000.0)))
+    return 1.0 / dt if dt > 0 else float("nan")
+
+
+def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None) -> dict:
+    """
+    IMU の時刻・鉛直加速度・速度と、レップの上昇ピークの位置を返す
+    （compute_imu_features と compare_video_imu.py で同じ速度を使うため）。
+
+    速度はレップごとに「ロックアウトで速度0・変位0」でドリフトを解き直したもの
+    （挙上の直後はすぐラックへ歩くので、ロックアウト後に静止区間が無いことが多い）。
+    rep_windows（動画のレップ区間を IMU の時刻に直したもの）があればその区間でレップを取り、
+    無ければ IMU だけで数える。時刻は M5 の時計（imu_on_device_clock）。
+    戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "rep_source"}
+    """
+    imu_df = imu_on_device_clock(imu_df)
     t = imu_df["timestamp_ms"].to_numpy() / 1000.0   # [s]
-    n = len(t)
     dt_med = float(np.median(np.diff(t)))
     fs = 1.0 / dt_med if dt_med > 0 else 100.0
-
-    gx = imu_df["gx_dps"].to_numpy()
-    gy = imu_df["gy_dps"].to_numpy()
 
     # 鉛直加速度（重力は静止区間で実測）と速度（静止点の間でドリフト補正）
     az_dyn_lp, v, g_ref, v_raw, v_hp, anchors = imu_vertical_velocity(imu_df, fs, dt_med)
 
-    # レップを選び、レップごとに「ロックアウトで速度0・変位0」でドリフトを解き直す
-    # （挙上の直後はすぐラックへ歩くので、ロックアウト後に静止区間が無いことが多い）
     if rep_windows:
         rep_idx = reps_from_video(v_hp, t, rep_windows, fs)
         rep_source = "video"
@@ -382,7 +413,33 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=N
         if peaks and p_new <= peaks[-1]:
             continue
         peaks.append(p_new)
-    peaks = np.array(peaks, dtype=int)
+    return {"t": t, "fs": fs, "dt": dt_med, "a": az_dyn_lp, "v": v, "g_ref": g_ref,
+            "peaks": np.array(peaks, dtype=int), "rep_source": rep_source}
+
+
+def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None) -> dict:
+    """
+    IMU CSV (timestamp_ms, ax_g, ay_g, az_g, gx_dps, gy_dps, gz_dps)
+    から特徴量を計算する。
+
+    expected_reps: meta.json の reps_completed（分かっていれば検出を補正する）
+    rep_windows  : 動画で数えたレップの区間を IMU の時刻に直したもの [(始まり, 底, 終わり) [s], ...]。
+                   あれば IMU のレップはこの区間で取る（時刻合わせ: sync_video_imu）。無ければ IMU だけで数える
+    注意: 3軸合成加速度を使うので向きの誤差には強いが、水平方向の加速度が大きいと誤差になる。
+          roll/pitch はジャイロの単純積分で
+          ドリフトを含むため、学習には使わない（train_rpe_model.py で除外）。
+    """
+    if len(imu_df) < 20:
+        return {"imu_n_samples": len(imu_df), "imu_error": "too few samples"}
+
+    n, recv_hz = len(imu_df), imu_recv_rate_hz(imu_df)
+    imu_df = imu_on_device_clock(imu_df)
+    m = imu_rep_velocity(imu_df, expected_reps=expected_reps, rep_windows=rep_windows)
+    t, dt_med = m["t"], m["dt"]
+    az_dyn_lp, v, g_ref, peaks, rep_source = m["a"], m["v"], m["g_ref"], m["peaks"], m["rep_source"]
+
+    gx = imu_df["gx_dps"].to_numpy()
+    gy = imu_df["gy_dps"].to_numpy()
 
     # 各種統計
     peak_v_up   = float(np.max(v))                # 上向きピーク速度
@@ -441,7 +498,7 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=N
 
     return {
         "imu_n_samples":              int(n),
-        "imu_fs_hz":                  round(fs, 2),
+        "imu_fs_hz":                  round(recv_hz, 2),   # 受信レート（M5 の時計で数える）
         "imu_gravity_ref_g":          round(g_ref, 4),
         # M5 の向きの確認用（画面が真上なら +1 g 前後）
         "imu_az_median_g":            round(float(np.median(imu_df["az_g"])), 3),
@@ -558,6 +615,7 @@ def sync_video_imu(kp_df, width, height, fps, imu_df, t_range=None) -> dict:
         sel = (t_v >= t_range[0]) & (t_v <= t_range[1])
         if sel.sum() >= 10:
             t_v, v_v = t_v[sel], v_v[sel]
+    imu_df = imu_on_device_clock(imu_df)
     t_i = imu_df["timestamp_ms"].to_numpy() / 1000.0
     dt = float(np.median(np.diff(t_i)))
     _, _, _, _, v_hp, _ = imu_vertical_velocity(imu_df, 1.0 / dt if dt > 0 else 100.0, dt)

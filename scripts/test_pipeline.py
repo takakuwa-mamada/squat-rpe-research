@@ -526,3 +526,52 @@ def test_quality_notes_failed_sync_without_excluding():
            "imu_first_rep_mcv_mps": 0.5, "imu_rep_source": "imu", "sync_r": 0.42, "sync_margin": 0.01}
     assert any("時刻合わせ" in i.text and not i.exclude for i in check_set(row))
     assert exclusion_reasons(row) == {"imu": [], "video": []}
+
+
+# ---------------------------------------------------------------------------
+# IMU の時刻は M5 の時計で・動画と IMU のレップ単位の比較（2026-10-31）
+# ---------------------------------------------------------------------------
+def m5_like_receive(imu):
+    """実機のような受信: M5 の時計（boot_ms）は 10 ms ごと。PC の受信時刻は Wi-Fi で揺れ、
+    遅れが 0.9 ms ずつ増えて 10 個ごとに戻る（間隔 10.9 ms × 9 + 1.9 ms → 中央値では 92 Hz に見える）。
+    2 秒ごとに 4 個欠ける"""
+    out = imu.copy()
+    k = np.arange(len(out))
+    out.insert(1, "boot_ms", 123456 + k * 10)
+    out["timestamp_ms"] = out["timestamp_ms"] + (k % 10) * 0.9
+    return out[(k % 200) < 196].reset_index(drop=True)
+
+
+def test_imu_uses_device_clock_not_receive_time():
+    """受信時刻の揺れ・欠けがあっても、M5 の時計で測れば速度・上昇時間は変わらない
+    （受信間隔の中央値を時間刻みにしていた頃は、実データで速度がセットごとに −15〜+11 % ずれていた）"""
+    imu, _, asc = make_imu(n_reps=5)
+    clean = ef.compute_imu_features(imu)
+    got = ef.compute_imu_features(m5_like_receive(imu))
+    assert got["imu_n_reps_detected"] == 5
+    assert abs(got["imu_first_rep_mcv_mps"] / clean["imu_first_rep_mcv_mps"] - 1) < 0.02
+    assert abs(got["imu_last_rep_mcv_mps"] / clean["imu_last_rep_mcv_mps"] - 1) < 0.02
+    assert abs(got["imu_first_rep_concentric_s"] - clean["imu_first_rep_concentric_s"]) < 0.03
+    assert 97.0 < got["imu_fs_hz"] < 99.0                     # 受信レート: 2 % 欠けた分だけ下がる
+    assert abs(got["_imu_reps"][0]["peak_t_s"] - clean["_imu_reps"][0]["peak_t_s"]) < 0.03   # 時刻の基準は同じ
+
+
+def test_compare_video_imu_agrees_on_true_scale():
+    """肩の上下動とバーが同じ動き・換算の倍率も正しいなら、動画と IMU の MCV・上昇時間は一致する。
+    身長を 10 % 大きく入れると、動画の MCV も 10 % 大きく出る（倍率のずれがそのまま出る）"""
+    import compare_video_imu as cv
+    kp, asc = make_keypoints(n_reps=5, lead=1.0, tail=1.0)
+    imu, _ = imu_with_walkout_and_rack()
+    imu = m5_like_receive(imu)
+    feat = {**ef.compute_pose_features(kp, 720, 1280, 30.0, view="front", expected_reps=5),
+            **ef.sync_video_imu(kp, 720, 1280, 30.0, imu)}
+    height_cm = 0.45 / 0.9 / ef.SHOULDER_ANKLE_RATIO * 100     # make_keypoints の肩の沈み 0.9 BL = 0.45 m
+    rows = pd.DataFrame(cv.compare_set(feat, kp, 720, 1280, 30.0, imu, height_cm, expected_reps=5))
+    assert len(rows) == 5
+    s = cv.summarize(rows).set_index("metric")
+    assert abs(s.loc["mcv", "ratio"] - 1) < 0.05
+    assert abs(s.loc["ascent_s", "bias"]) < 0.05
+    # 底の時刻がそろう（合成の底は 0.2 s 止まるので、その中のどこを底とするかは揺れる）
+    assert rows["bottom_gap_s"].abs().median() < 0.07 and rows["bottom_gap_s"].abs().max() < 0.25
+    big = pd.DataFrame(cv.compare_set(feat, kp, 720, 1280, 30.0, imu, height_cm * 1.1, expected_reps=5))
+    assert abs(big["vid_mcv"].mean() / rows["vid_mcv"].mean() - 1.1) < 0.01
