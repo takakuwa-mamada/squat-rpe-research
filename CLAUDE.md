@@ -77,9 +77,20 @@ data/ を git 履歴から削除。2026-10-25 にプロジェクトを Google �
   - 倍率はカメラ位置で変わる（MCV で S001 set3（画角が違う）+15〜18 %、set1・2 −2〜+9 %、S002 +1〜10 %）。IMU も 1 レップ目の ROM が 5〜10 cm 小さい傾向があり、IMU 側の誤差も否定できない。
   - 原因の候補: 肩の点はバーではない（前傾すると肩の方が大きく下がる）、0.779 は肩峰の表の平均（YOLO の肩の点は少し低い）、レンズ・遠近。
   - 同じ人の中の比較（速度低下 % など）は一定倍率なら影響しない。人をまたぐ絶対値（m/s）には補正が要る。速度低下は動画の方がばらつく（S001 set2: IMU 6.8 % / 動画 14.3 %）。
-  - 改善案（未着手）: 正面から見えるプレートの縦の長さ（直径 45 cm）を物差しにしてバーそのものを追う／IMU の6面キャリブレーション。
+  - 改善案: IMU の6面キャリブレーション（未着手）。プレート（直径 45 cm）を物差しにする換算は 2026-10-30 にやめた（ユーザー判断）。
+    → 動画の m/s にはセットごとの倍率のずれ（0.97〜1.26）が残る。速度低下など同じ動画の中の比はこのずれの影響を受けない。
+  - **2026-10-30 更新（56 レップ・5 日・2人、参考値。骨格が欠けていた 3 セットは含まない）**: 差 +0.048 m/s（×1.11、95 % 一致限界 −0.035〜+0.131）、r 0.92。
+    日ごとの差 +0.013〜+0.118 m/s（10/20 が最大）。倍率はセット（動画）ごとに 0.97〜1.26 と変わるが、同じセットの中の差のばらつきは SD 0.015 m/s
+    → ずれは動画ごとの倍率。速度低下（比）なら差は +2.6 ポイント（最大 9.0、10 セット）、r 0.95。
+- **S001 の速度と RPE（2026-10-30、4 日 13 セット、IMU、参考値）**: RPE との相関は 1 レップ目 MCV −0.74、最終レップ MCV −0.89、速度低下 +0.82。
+  同じ RPE でも回数が多いほど速度低下が大きい（RPE 8: 3 回 17 % / 5 回 20 % / 8 回 27 %）。最終レップの速度は回数による差が小さい（RPE 8: 0.34〜0.38 m/s）。
+  10/29 の 85 kg×8 は RPE 7 と 8 で速度がほぼ同じ（RPE 1 段階が速度に出ない例）。図と表は週報（Week 2026-10-26）。
 - ファーム v4（PC 自動検出）はローカルで編集済み・未書き込み。WIFI_LIST にテザリングを追加して書き込むのはユーザー（出発前）。
-- テスト: `pytest scripts\test_pipeline.py -q`（合成データ 14 件、約 1.5 分）。
+- テスト: `pytest scripts\test_pipeline.py -q`（20 件、約 2 分）。
+- **学習に使えないセットは外す（2026-10-30）**: 基準は `scripts/quality_checks.py`（品質レポートと共通）。IMU が使えないセットは IMU を使う条件から、
+  動画が使えないセットは動画を使う条件から外す（context には残る）。外すもの: データなし・レップ数 ≠ 申告・速度低下 −10 % 未満（レップの取り違え）・
+  IMU の受信 80 Hz 未満・足元切れ・人物の検出漏れ 20 % 超・正面でない。信頼度の低さと M5 の向きは要確認だけ。
+  2026-10-30 時点の S001（14 セット）で外れるのは IMU 3（10/20 set02・10/29 set01・set04）、動画 2（10/20 set02・10/24 set04）。
 - **RPE 5 以下のセットの扱い（2026-10-24 決定）**: ウォームアップは研究データにしない。本番セットの RPE 5 以下は保存して学習にも使う。
   `train_rpe_model.py` は学習データを「全 RPE」と「RPE 5 以上だけ」の2通りで作り（テストは同じセット）、評価を「全セット」と「RPE 6 以上」で出す。
   主結果は「学習: 全 RPE／評価: RPE 6 以上」。RPE 5 以下は申告がぶれやすい（限界から遠いほど RIR の見積もりがずれる）ため主評価から外す。
@@ -99,7 +110,9 @@ G:\マイドライブ\大学院\M1\Projects\Research\   （OneDrive「大学院�
 │   ├─ subjects.json                         被験者ID ↔ 名前・プロフィール（身長・体重・1RM・歴）
 │   ├─ _sessions/session_YYYYMMDD_HHMMSS/   本人の受信スクリプトの生出力＋その日の動画（直下に置く）
 │   ├─ _remote/<名前>/<日付>/                協力者の受け取り置き場（--src で Google Drive から直接でも可）
-│   └─ S001/SES005/ …, S002/SES001/ …       解析用（meta.json, imu/, videos/, pose/, features/）。S001 の次は SES006
+│   ├─ _archive/                             取り込み直しなどで外したセッションの置き場（data/ の中なので git に入らない。
+│   │                                         _ で始まるフォルダはパイプラインが見ない）。ルートの _archive/ は git に入るのでデータを置かない
+│   └─ S001/SES001/ …, S002/SES001/ …       解析用（meta.json, imu/, videos/, pose/, features/）。SES 番号は split_session が自動で振る
 ├─ outputs/                  ★git 管理外。features_all.csv（1行=1セット）, quality_report.csv
 ├─ models/                   ★git 管理外。train_rpe_model.py の出力（report.md ほか）
 ├─ docs/                     研究計画書, チートシート, 協力者向け撮影ガイド, 研究コンテキスト.md, 計測メニュー.xlsx
@@ -110,9 +123,8 @@ G:\マイドライブ\大学院\M1\Projects\Research\   （OneDrive「大学院�
 ## 5. パイプライン
 
 ```powershell
-# 本人（IMU＋動画）: 計測後
-python scripts\split_session.py --subject S001 --session SES006     # 重量・回数は受信時に入力済み（直すときだけ --weights/--reps）
-python scripts\run_pipeline.py                     # 骨格推定 → 特徴量 → 集計 → 品質レポート
+# 本人（IMU＋動画）: 計測後は動画を data\_sessions\session_…\ 直下にコピーして、これだけ
+python scripts\run_pipeline.py                     # 取り込み（SES 番号は自動）→ 骨格推定 → 特徴量 → 集計 → 品質レポート
 # 協力者（動画のみ）
 python scripts\ingest_remote.py --src "G:\マイドライブ\スクワット研究"
 python scripts\run_pipeline.py
@@ -123,13 +135,14 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 | スクリプト | 役割 |
 |---|---|
 | `multi_imu_receiver.py` | 複数 M5 から UDP 5005 で受信。**UDP 5006 に PC の居場所の合図（"SQUATPC"）を毎秒ブロードキャスト**（v4 ファームが受け取る。`--no-beacon`）。キー: SPACE=セット開始/終了、5〜9=RPE、0=RPE10、u=取消、w=次の重量・回数（ターミナル入力）、q=終了（**q で終えないと markers.csv が出ない**）。**起動時に「重量 回数」を聞き**（`--weight`/`--reps` で省略可）、markers.csv の `weight_kg, reps` 列とフォルダ名 `_90kg_3rep` に入る |
-| `split_session.py` | `_sessions` → `data/S001/SESxxx/`。マーカーで切り出し（前後0.3 s）、直下の動画をファイル名順に setNN へ。`--weights`/`--reps` で一括入力、ファイル名 `130kg_3rep` からも読む。**再実行しても meta.json の手入力値は残る**。`--view`（既定 front） |
+| `split_session.py` | `_sessions` → `data/S001/SESxxx/`。**`--session` なしなら自動モード**（2026-10-30）: どの meta.json にも入っていない受信フォルダを、開始時刻が 3 時間以内に続くもの＝同じジムの日として1セッションにまとめ、次の SES 番号を振る（被験者は既定 S001、`--gap-hours`、`--dry-run`）。動画が入っていないフォルダを含む日は取り込まず「待ち」と表示（`--allow-no-video`）。run_pipeline.py が最初に呼ぶ。手動モード（`--session SESnnn --src …`）は番号の指定・作り直し用。マーカーで切り出し（前後0.3 s）、直下の動画をファイル名順に setNN へ。重量・回数は markers.csv → 動画ファイル名 → `--weights`/`--reps`（最優先）。**再実行しても meta.json の手入力値は残る**。`--view`（既定 front） |
 | `ingest_remote.py` | 協力者: `<名前>/<日付>/*.mp4|mov` → `data/S00x/SESnnn/`。ラベルはファイル名（`100kg_5rep_RPE8`, `100kgx5@8`）か `記録.txt`（撮影順に「重量 回数 RPE」）。撮影順は ffprobe の撮影日時。`プロフィール.txt` → subjects.json。不備のあるフォルダは理由を出して取り込まない |
-| `run_pipeline.py` | pose → features → aggregate → **品質レポート**（ラベル欠損、検出失敗、足元切れ、正面でない、レップ数の不一致、M5 の向き、受信レート）＋被験者ごとの集まり具合。`--force-features` |
-| `pose_extract_yolo.py` | YOLO26 Pose で 17 点。**挙上者を追跡**（初回は最大の人、以降は前フレームに最も近い人）。`_yolo_info.json` に動画の縦横サイズ。`data/_remote` は対象外 |
+| `run_pipeline.py` | **split（本人の新しい計測の自動取り込み、`--no-split`）** → pose → features → aggregate → **品質レポート**（ラベル欠損、検出失敗、足元切れ、正面でない、レップ数の不一致、速度低下の異常、M5 の向き、受信レート。`excluded_from` 列 = 学習から外すデータ）＋被験者ごとの集まり具合。`--force-features` |
+| `quality_checks.py` | 1 セットの品質チェック（run_pipeline の品質レポートと train_rpe_model の除外で共通）。しきい値はここだけで管理 |
+| `pose_extract_yolo.py` | YOLO26 Pose で 17 点。**挙上者を追跡**（初回は最大の人、以降は前フレームに最も近い人）。`_yolo_info.json` に動画の縦横サイズ。`data/_` で始まるフォルダ（_remote・_sessions・_archive）は対象外（取り込み後の videos/ だけ処理。明示すれば `--subject _sessions` も可） |
 | `extract_features.py` | 1セット → JSON。IMU（レップ単位の MCV/MPV/ピーク/VL/上昇時間）＋骨格（正面用 22 次元）＋ %1RM。動画だけの試技も可。`_imu_reps`/`_pose_reps` にレップ詳細 |
-| `aggregate_features.py` | 全 JSON → `outputs/features_all.csv`（`_` で始まるキーは入れない） |
-| `train_rpe_model.py` | 評価 A/B/C/D × 条件（context / imu_velocity / imu_all / video_velocity / video_all / imu+video、`--with-context`）× **学習の範囲（全 RPE ／ RPE 5 以上、`--train-min-rpe`）× 評価の範囲（全セット ／ RPE 6 以上 = 主結果、`--eval-min-rpe`）**。RPE 5 未満が無いと学習は全 RPE だけ。特徴量は明示リスト。report.md（後半に範囲の比較表）、図、best.pkl |
+| `aggregate_features.py` | 全 JSON → `outputs/features_all.csv`（`_` で始まるキーは入れない。`data/_` で始まるフォルダは集計しない） |
+| `train_rpe_model.py` | 評価 A/B/C/D × 条件（context / imu_velocity / imu_all / video_velocity / video_all / imu+video、`--with-context`）× **学習の範囲（全 RPE ／ RPE 5 以上、`--train-min-rpe`）× 評価の範囲（全セット ／ RPE 6 以上 = 主結果、`--eval-min-rpe`）**。RPE 5 未満が無いと学習は全 RPE だけ。特徴量は明示リスト。**学習に使えないセットはデータ（IMU / 動画）ごとに外す**（`quality_checks.py`、report.md に一覧）。report.md（後半に範囲の比較表）、図、best.pkl |
 | `predict_rpe.py` | 学習済みモデルで予測（`--latest` は best.pkl 優先） |
 | `test_pipeline.py` | 合成データのテスト（複数レップの骨格・IMU、ラベル解析、評価の通し） |
 | `bar_path_extract.py` + `bar_tracking.py` | プレート追跡（**側面撮影が前提なので現方針では使わない**） |
@@ -161,6 +174,9 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
    今はセット単位の指標（MCV・上昇時間）どうしで比較できる。
 4. 骨格: COCO 17 点に足先が無い。正面なので屈曲角・体幹前傾は使わない（`view != front` だと正面用の特徴は None）。
    ジムの鏡で本人が2人映る場合、追跡が鏡像に移る可能性は未検証。
+   2026-10-30 修正: 人の検出が弱いフレーム（信頼度 0.3 未満）が 0.3 秒以上続くと `_nanstat` が NaN を返し、
+   体の大きさ（BL）が求まらず「body too small or not detected」で骨格特徴がまるごと欠損していた（10/20・24・29 の 3 セット）。
+   `_nanstat` が NaN を除くように直した（テスト `test_pose_survives_low_confidence_gap`）。
 5. 1レップのセットでは velocity_loss・変化量は null（HGB と補完付きモデルで扱う）。
 6. RPE の申告の癖は人によって違う → 汎用モデル（B）は精度が伸びにくい可能性。C でパーソナライズの効果を見る。
 7. 協力者の動画は **LINE 経由だと撮影日時が消える** → 撮影順がファイル名順になる（ガイドで Google Drive を指定済み）。
@@ -173,6 +189,13 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 11. `docs/研究計画書.pdf` はパスワード保護。本文は `docs/研究計画書_source.js`。
 12. `docs/計測チェックリスト.docx/.pdf` は 2026-09-27 に正面撮影版へ作り直した（生成: `node docs\計測チェックリスト_source.js`、docx は npm で別途）。旧版は `_archive/計測チェックリスト_旧_側面撮影.*`。
 13. Bash ツールのヒアドキュメントで `\n` などのバックスラッシュが潰れることがある → 置換スクリプトはファイルに書いてから実行する。
+14. **レップ数の検出（2026-10-30 時点）**: 動画（骨格）は 17/17 セットで申告と一致。IMU は**ラックアウト直後の 1 回目を取りこぼす**ことがある
+    （10/20 set02・10/29 set01、どちらも 8 回のセット。IMU と動画のレップの間隔を並べると 1 つずれていた）。
+    10/20 set02 は取りこぼした代わりに**ラックインを 1 回と数えて回数が一致**したため品質レポートでは気づけず、
+    最後のレップ 0.665 m/s・速度低下 −25 % になっていた → 速度低下が −10 % 未満のセットは学習から外す（quality_checks.py）。
+    根本対策は §8 の 7（時刻合わせ → 動画のレップ時刻で IMU を切り出す）。
+    動画側の未対応の弱点: 申告より多く検出したときは沈み込みの大きい順に N 個を残すので、RPE 10 で潰れたレップ
+    （セーフティに置いてから立ち上がる動き）が残り、本物のレップが落ちる可能性がある。
 
 ## 8. 次にやること（優先順）
 
@@ -188,6 +211,7 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 
 **解析（並行して進められる）**
 7. `sync_align.py`: 動画1本ごとに IMU 速度と肩の上下動の相互相関で時刻合わせ → レップ単位の Bland–Altman（RQ2）。
+   合わせたら IMU のレップも動画のレップ時刻で切り出す（§7 の 14: 1 回目の取りこぼし・ラックインの誤検出をなくす）。
 8. 複数レップの実データで骨格・IMU のレップ検出のしきい値を確認（`_pose_reps` / `_imu_reps` を見る）。
 9. 12月: `train_rpe_model.py` で A〜D、1月: 誤差分析・図表・発表資料。
 
@@ -199,6 +223,8 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 - 各セット: 録画開始 → SPACE → ラックアウト→挙上→ラックイン → SPACE → **速度表示を見る前に RPE を声に出す（15秒以内、後から変えない）** → 数字キー → 録画停止。
 - 終了: q → mean Hz 90〜100、セット数、RPE 未入力なしを確認。
 - メニュー: A ヘビー / B ミディアム / C ボリューム（`docs/スクワット計測メニュー.xlsx`）。後半はわざと重量を下げても RPE が上がる構成。
+- **回数のルール（2026-10-30 決定）**: 同じ日の中は回数を固定（5 回の日・8 回の日など）し、重量で RPE を変える。日ごとに回数は変えてよく、回数はモデルの入力にする
+  （同じ RPE でも回数が多いほど速度低下が大きいため）。xlsx のメニューはセットごとに回数が変わる旧版。
 - 協力者: `docs/協力者向け撮影ガイド.md`（正面・1セット1本・ファイル名 `100kg_5rep_RPE8` か `記録.txt`・Google Drive で送る）。
   スマホ用ページ: https://claude.ai/artifact/LHkdc4JZxy8qCGsv7iBVBU（元ファイル `docs/協力者向け撮影ガイド.html`。内容を変えたら .md と両方直して、Artifact の url 指定で再公開）。
 

@@ -38,6 +38,8 @@ def find_feature_jsons(filter_subject=None):
         if len(parts) < 4:
             continue
         subj = parts[0]
+        if subj.startswith("_"):      # _archive（外したセッションの置き場）・_sessions・_remote は集計しない
+            continue
         if filter_subject and subj != filter_subject:
             continue
         results.append(p)

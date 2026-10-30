@@ -3,11 +3,12 @@
 =============================================================================
  解析パイプラインを1本で回し、データの品質を報告するスクリプト
 
-   骨格推定（未処理の動画だけ）→ 特徴量（未処理の試技だけ）→ 集計 → 品質レポート
+   本人の計測の取り込み（未取り込みの受信フォルダを日ごとに自動で SESnnn に）
+   → 骨格推定（未処理の動画だけ）→ 特徴量（未処理の試技だけ）→ 集計 → 品質レポート
 
- 計測・取り込みのあとはこれだけ実行すればよい:
-   本人（IMU＋動画）: python scripts\\split_session.py ... → python scripts\\run_pipeline.py
-   協力者（動画のみ）: python scripts\\ingest_remote.py    → python scripts\\run_pipeline.py
+ 計測のあとはこれだけ実行すればよい:
+   本人（IMU＋動画）: 動画を data\\_sessions\\session_…\\ の直下にコピー → python scripts\\run_pipeline.py
+   協力者（動画のみ）: python scripts\\ingest_remote.py → python scripts\\run_pipeline.py
 
  使い方:
    python scripts\\run_pipeline.py                    # 全被験者
@@ -15,10 +16,13 @@
    python scripts\\run_pipeline.py --force-features   # 特徴量を全部作り直す（コードを直したとき）
    python scripts\\run_pipeline.py --report-only      # 品質レポートだけ
    python scripts\\run_pipeline.py --no-video         # 骨格を描いた確認用動画を作らない（速い）
+   python scripts\\run_pipeline.py --no-split         # 本人の計測の自動取り込みをしない
 
  出力:
    outputs/features_all.csv      1行 = 1セット（学習の入力）
-   outputs/quality_report.csv    1行 = 1セット、要確認の理由つき
+   outputs/quality_report.csv    1行 = 1セット、要確認の理由つき。
+                                 excluded_from = 学習から外すデータ（IMU / 動画）。
+                                 基準は quality_checks.py（train_rpe_model.py も同じ基準で外す）
 =============================================================================
 """
 
@@ -28,6 +32,8 @@ import subprocess
 from pathlib import Path
 
 import pandas as pd
+
+from quality_checks import check_set
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -47,59 +53,17 @@ def run(script: str, *args) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 品質チェック
+# 品質チェック（基準は quality_checks.py。学習から外すかどうかも同じ基準で決まる）
 # ---------------------------------------------------------------------------
-def _num(row, key):
-    v = row.get(key)
-    try:
-        return None if v is None or pd.isna(v) else float(v)
-    except (TypeError, ValueError):
-        return None
-
-
 def check_row(row) -> list:
-    """1セットぶんの要確認事項を返す"""
-    issues = []
-    if _num(row, "rpe") is None:
-        issues.append("RPE 未入力")
-    if _num(row, "weight_kg") is None:
-        issues.append("重量 未入力")
-    reps = _num(row, "reps_completed")
-    if reps is None:
-        issues.append("回数 未入力")
+    """1セットぶんの要確認事項（文字列のリスト）"""
+    return [i.text for i in check_set(row)]
 
-    # 骨格
-    if not bool(row.get("pose_available")):
-        issues.append(f"骨格なし（{row.get('pose_error') or '動画/骨格推定を確認'}）")
-    else:
-        nan_ratio = _num(row, "pose_nan_ratio")
-        vis = _num(row, "pose_key_visibility_mean")
-        ankle = _num(row, "pose_ankle_y_max_norm")
-        shw = _num(row, "pose_shoulder_width_bl")
-        pr = _num(row, "pose_n_reps_detected")
-        if nan_ratio is not None and nan_ratio > 0.2:
-            issues.append(f"人物を検出できないフレームが {nan_ratio:.0%}")
-        if vis is not None and vis < 0.6:
-            issues.append(f"キーポイントの信頼度が低い（{vis:.2f}）")
-        if ankle is not None and ankle > 0.97:
-            issues.append("足元が画面の下端で切れている")
-        if shw is not None and shw < 0.12:
-            issues.append(f"正面から撮れていない可能性（肩幅/体高 {shw:.2f}）")
-        if reps is not None and pr is not None and pr != reps:
-            issues.append(f"骨格のレップ検出 {int(pr)} ≠ 申告 {int(reps)}")
 
-    # IMU（ある場合）
-    if row.get("modality") == "imu+video" or _num(row, "imu_n_samples") is not None:
-        az = _num(row, "imu_az_median_g")
-        fs = _num(row, "imu_fs_hz")
-        ir = _num(row, "imu_n_reps_detected")
-        if az is not None and az < 0.8:
-            issues.append(f"M5 の向きが違う可能性（az 中央値 {az:.2f} g。画面を真上に）")
-        if fs is not None and fs < 80:
-            issues.append(f"IMU の受信レートが低い（{fs:.0f} Hz）")
-        if reps is not None and ir is not None and ir != reps:
-            issues.append(f"IMU のレップ検出 {int(ir)} ≠ 申告 {int(reps)}")
-    return issues
+def excluded_from(row) -> str:
+    """学習から外すデータ: "IMU" / "動画" / "IMU・動画" / ""（どちらも使える）"""
+    parts = {i.part for i in check_set(row) if i.exclude}
+    return "・".join(name for part, name in (("imu", "IMU"), ("video", "動画")) if part in parts)
 
 
 def quality_report(subject=None):
@@ -113,10 +77,13 @@ def quality_report(subject=None):
         print("[INFO] 対象の試技がありません")
         return
 
-    df["issues"] = [" / ".join(check_row(r)) for r in df.to_dict("records")]
+    recs = df.to_dict("records")
+    df["issues"] = [" / ".join(check_row(r)) for r in recs]
+    df["excluded_from"] = [excluded_from(r) for r in recs]
     cols = [c for c in ["subject_id", "session_id", "date", "set_no", "modality", "weight_kg",
                         "reps_completed", "rpe", "imu_n_reps_detected", "pose_n_reps_detected",
-                        "imu_first_rep_mcv_mps", "pose_first_rep_mcv_bl", "issues"] if c in df.columns]
+                        "imu_first_rep_mcv_mps", "pose_first_rep_mcv_bl", "issues", "excluded_from"]
+            if c in df.columns]
     df[cols].to_csv(QUALITY_CSV, index=False, encoding="utf-8-sig")
 
     print(f"\n{'=' * 64}\n 品質レポート（詳細: {QUALITY_CSV.relative_to(PROJECT_ROOT)}）\n{'=' * 64}")
@@ -126,7 +93,8 @@ def quality_report(subject=None):
         print(f"\n[{mark}] {sid}/{ses}  {g['date'].iloc[0]}  {len(g)}セット  "
               f"RPE {sorted(g['rpe'].dropna().unique().tolist())}")
         for _, r in g[g["issues"] != ""].iterrows():
-            print(f"      set{int(r['set_no']):02d}: {r['issues']}")
+            ex = f"　→ 学習から除外: {r['excluded_from']}" if r["excluded_from"] else ""
+            print(f"      set{int(r['set_no']):02d}: {r['issues']}{ex}")
 
     # データの集まり具合
     print(f"\n{'=' * 64}\n データの集まり具合（目安: 1人 {TARGET_TRIALS_PER_SUBJECT} 試技、RPE 6〜10 が満遍なく）\n{'=' * 64}")
@@ -138,6 +106,11 @@ def quality_report(subject=None):
         print(f"  {sid}: セッション {g['session_id'].nunique()}  試技 {len(g)}（問題なし {len(good)}"
               f" / 目安まで あと {max(0, TARGET_TRIALS_PER_SUBJECT - len(good))}）  RPE分布 {dist_txt}")
     print(f"  合計: 被験者 {df['subject_id'].nunique()} 人、試技 {len(df)}（問題なし {len(ok)}）")
+    n_imu = int(df["excluded_from"].str.contains("IMU").sum())
+    n_vid = int(df["excluded_from"].str.contains("動画").sum())
+    if n_imu or n_vid:
+        print(f"  学習から除外: IMU {n_imu} セット、動画 {n_vid} セット"
+              "（そのデータを使う条件だけ。train_rpe_model.py も同じ基準で外す）")
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +122,14 @@ def main():
     ap.add_argument("--force-features", action="store_true", help="特徴量を全部作り直す")
     ap.add_argument("--report-only", action="store_true", help="品質レポートだけ出す")
     ap.add_argument("--no-video", action="store_true", help="骨格を描いた確認用動画を作らない")
+    ap.add_argument("--no-split", action="store_true",
+                    help="本人の計測（data/_sessions）の自動取り込みをしない")
     args = ap.parse_args()
 
     if not args.report_only:
+        # 0. 本人の計測の取り込み（新しい受信フォルダがあれば、日ごとに次の SES 番号で取り込む）
+        if not args.no_split and not run("split_session.py"):
+            print("[WARN] 計測の取り込みでエラーがありました（続行します）")
         subj = ["--subject", args.subject] if args.subject else []
         pose_args = subj + (["--no-video"] if args.no_video else [])
         if not run("pose_extract_yolo.py", *pose_args):

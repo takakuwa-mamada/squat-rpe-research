@@ -114,6 +114,18 @@ def test_pose_detects_all_reps_and_fatigue():
     assert 0.2 < f["pose_shoulder_width_bl"] < 1.0      # 正面
 
 
+def test_pose_survives_low_confidence_gap():
+    """人の検出が弱いフレームが 1 秒続いても、骨格特徴がまるごと欠損しない（2026-10-30 の不具合）"""
+    kp, _ = make_keypoints(n_reps=3)
+    gap = (kp["time_s"] > 1.0) & (kp["time_s"] < 2.0)          # 立位の 1 秒間だけ信頼度を下げる
+    for c in [c for c in kp.columns if c.endswith("_conf")]:
+        kp.loc[gap, c] = 0.05
+    f = ef.compute_pose_features(kp, 720, 1280, 30.0, view="front")
+    assert f["pose_available"] is True
+    assert f["pose_n_reps_detected"] == 3
+    assert f["pose_first_rep_mcv_bl"] is not None
+
+
 def test_pose_rep_cap_by_reported_reps():
     kp, _ = make_keypoints(n_reps=5)
     f = ef.compute_pose_features(kp, 720, 1280, 30.0, view="front", expected_reps=3)
@@ -178,6 +190,46 @@ def make_imu_double_hump(fs=100.0, depths=(0.52, 0.55, 0.56), descent=1.0, ascen
         "gx_dps": -3.8 + rng.normal(0, 1, len(t)), "gy_dps": -12.9 + rng.normal(0, 1, len(t)),
         "gz_dps": 16.0 + rng.normal(0, 1, len(t)),
     })
+
+
+def test_split_groups_receiver_folders_into_gym_visits():
+    """受信フォルダは開始時刻が 3 時間以内に続けば同じ日（セッション）。日付をまたいでもよい"""
+    import split_session as ss
+    from datetime import datetime
+    t = lambda s: datetime.strptime(s, "%Y-%m-%d %H:%M")
+    items = [("a", t("2026-09-18 00:45")), ("b", t("2026-09-17 23:50")),
+             ("c", t("2026-10-20 20:03")), ("d", t("2026-10-20 20:10")), ("e", t("2026-10-20 23:30"))]
+    assert ss.group_visits(items, gap_hours=3) == [["b", "a"], ["c", "d"], ["e"]]
+
+
+def test_split_finds_unimported_folders_and_next_number(tmp_path):
+    import split_session as ss
+    (tmp_path / "S001" / "SES001").mkdir(parents=True)
+    (tmp_path / "S001" / "SES001" / "meta.json").write_text(
+        json.dumps({"source_sessions": ["session_20261015_151052"]}), encoding="utf-8")
+    (tmp_path / "S001" / "SES003").mkdir()
+    assert ss.imported_folders(tmp_path) == {"session_20261015_151052"}
+    assert ss.next_session_number("S001", tmp_path) == 4      # 抜けがあっても最後の番号の次
+    assert ss.next_session_number("S009", tmp_path) == 1
+
+
+def test_underscore_folders_are_skipped(tmp_path, monkeypatch):
+    """data/_archive（外したセッション）・_sessions など _ で始まるフォルダは集計・骨格推定の対象にしない"""
+    import aggregate_features as af
+    for sub in ("S001/SES001", "_archive/split_1029/SES004"):
+        (tmp_path / sub / "features").mkdir(parents=True)
+        (tmp_path / sub / "features" / "set01_features.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(af, "DATA_ROOT", tmp_path)
+    assert [p.relative_to(tmp_path).parts[0] for p in af.find_feature_jsons()] == ["S001"]
+
+    pytest.importorskip("ultralytics")
+    import pose_extract_yolo as px
+    for sub in ("S001/SES001/videos", "_archive/split_1029/SES004/videos", "_sessions/session_x"):
+        (tmp_path / sub).mkdir(parents=True, exist_ok=True)
+        (tmp_path / sub / "set01.mp4").write_bytes(b"")
+    monkeypatch.setattr(px, "DATA_ROOT", tmp_path)
+    assert [v.relative_to(tmp_path).parts[0] for v, _ in px.find_videos()] == ["S001"]
+    assert [v.relative_to(tmp_path).parts[0] for v, _ in px.find_videos("_sessions")] == ["_sessions"]
 
 
 def test_imu_double_hump_ascent_counts_each_rep_once():
@@ -301,3 +353,70 @@ def test_train_compares_training_rpe_range(tmp_path):
     curves = pd.read_csv(out / "curves.csv")
     assert {"all", "rpe>=5"} <= set(curves["train_set"])
     assert "学習データの範囲の比較" in (out / "report.md").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 学習に使えないセット（データの欠け・レップの取り違え）を外す（品質レポートと同じ基準）
+# ---------------------------------------------------------------------------
+def test_quality_marks_unusable_data():
+    from quality_checks import check_set, exclusion_reasons
+    import run_pipeline as rp
+    ok = {"rpe": 8, "weight_kg": 90, "reps_completed": 8, "modality": "imu+video",
+          "pose_available": True, "pose_n_reps_detected": 8, "pose_first_rep_mcv_bl": 0.4,
+          "pose_ankle_y_max_norm": 0.8, "pose_shoulder_width_bl": 0.25, "pose_nan_ratio": 0.0,
+          "pose_key_visibility_mean": 0.99, "pose_velocity_loss_pct": 20.0,
+          "imu_n_samples": 6000, "imu_fs_hz": 100.0, "imu_az_median_g": 1.04,
+          "imu_n_reps_detected": 8, "imu_first_rep_mcv_mps": 0.5, "imu_velocity_loss_mcv_pct": 22.0}
+    assert exclusion_reasons(ok) == {"imu": [], "video": []} and check_set(ok) == []
+    # IMU が 1 回取りこぼした → IMU だけ外す（動画は使う）
+    r = exclusion_reasons(ok | {"imu_n_reps_detected": 7})
+    assert r["imu"] and not r["video"]
+    assert rp.excluded_from(ok | {"imu_n_reps_detected": 7}) == "IMU"
+    # 回数は合っているが、最後のレップが 1 回目より 25 % 速い（ラックインを数えた）→ IMU を外す
+    assert exclusion_reasons(ok | {"imu_velocity_loss_mcv_pct": -24.9})["imu"]
+    # 送信が途中で止まった（IMU のレップ 0）→ IMU を外す
+    assert exclusion_reasons(ok | {"imu_n_reps_detected": 0, "imu_first_rep_mcv_mps": None})["imu"]
+    # 足元が切れている → 動画だけ外す
+    r = exclusion_reasons(ok | {"pose_ankle_y_max_norm": 1.0})
+    assert r["video"] and not r["imu"]
+    assert rp.excluded_from(ok | {"pose_ankle_y_max_norm": 1.0, "imu_n_reps_detected": 7}) == "IMU・動画"
+    # キーポイントの信頼度が低い・M5 の向きは要確認として出すだけ（学習には使う）
+    low = ok | {"pose_key_visibility_mean": 0.5, "imu_az_median_g": 0.5}
+    assert exclusion_reasons(low) == {"imu": [], "video": []} and len(check_set(low)) == 2
+    # 動画だけの協力者には IMU の確認をしない
+    vid = {k: v for k, v in ok.items() if not k.startswith("imu_")} | {"modality": "video"}
+    assert exclusion_reasons(vid) == {"imu": [], "video": []}
+
+
+def test_train_excludes_unusable_sets(tmp_path):
+    """データが欠けているセットは、そのデータ（IMU / 動画）を使う条件の学習・テストから外す"""
+    df = synthetic_features(seed=2)
+    df["pose_available"] = True
+    df["pose_n_reps_detected"] = df["reps_completed"]
+    imu_rows = df["modality"] == "imu+video"
+    df.loc[imu_rows, "imu_n_reps_detected"] = df.loc[imu_rows, "reps_completed"]
+    s1 = df.index[df["subject_id"] == "S001"]
+    bad_imu = [s1[0], s1[1]]                     # IMU の取りこぼし ／ ラックインを数えた
+    df.loc[bad_imu[0], "imu_n_reps_detected"] = df.loc[bad_imu[0], "reps_completed"] + 1
+    df.loc[bad_imu[1], "imu_velocity_loss_mcv_pct"] = -25.0
+    bad_vid = [s1[2], df.index[df["subject_id"] == "S003"][0]]   # 足元が切れている ／ 骨格のレップ数が違う
+    df.loc[bad_vid[0], "pose_ankle_y_max_norm"] = 1.0
+    df.loc[bad_vid[1], "pose_n_reps_detected"] = df.loc[bad_vid[1], "reps_completed"] + 1
+    csv = tmp_path / "features_all.csv"
+    df.to_csv(csv, index=False)
+    r = subprocess.run([sys.executable, str(SCRIPT_DIR / "train_rpe_model.py"), "--input", str(csv),
+                        "--output-dir", str(tmp_path / "models"), "--kmax", "2"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    out = next((tmp_path / "models").iterdir())
+    pred = pd.read_csv(out / "predictions.csv")
+    ids = lambda idx: {(df.at[i, "subject_id"], df.at[i, "session_id"], int(df.at[i, "set_no"])) for i in idx}
+    got = lambda p: set(zip(p["subject_id"], p["session_id"], p["set_no"].astype(int)))
+    uses_imu = pred["condition"].str.contains("imu")
+    uses_video = pred["condition"].str.contains("video")
+    assert not got(pred[uses_imu]) & ids(bad_imu)            # IMU を使う条件には入らない
+    assert not got(pred[uses_video]) & ids(bad_vid)          # 動画を使う条件には入らない
+    assert ids(bad_imu) <= got(pred[pred["condition"] == "video_all"])   # 動画の条件には残る
+    assert ids(bad_vid[:1]) <= got(pred[pred["condition"] == "imu_all"]) # IMU の条件には残る
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "学習から外したセット" in report and "足元が画面の下端で切れている" in report

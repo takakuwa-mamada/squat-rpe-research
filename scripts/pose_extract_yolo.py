@@ -411,8 +411,10 @@ def find_videos(filter_subject: Optional[str] = None):
                 continue
             if filter_subject and parts[0] != filter_subject:
                 continue
-            # 協力者の受け取り置き場は ingest_remote.py で取り込んだ後に処理する
-            if parts[0] == "_remote" and filter_subject != "_remote":
+            # _ で始まるフォルダ（協力者の受け取り置き場 _remote、本人の受信フォルダ _sessions、
+            # 外したセッションの置き場 _archive）は対象外。取り込み後（data/S00x/SESnnn/videos/）だけ処理する
+            # （骨格だけ試すときは --subject _sessions のように明示する）
+            if parts[0].startswith("_") and filter_subject != parts[0]:
                 continue
             # 出力先: videos/ の中なら1つ上、そうでなければ同じ階層に pose/ を作る
             if video.parent.name == "videos":

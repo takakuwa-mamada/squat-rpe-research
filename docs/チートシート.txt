@@ -31,15 +31,16 @@
 
 ■ 帰宅後（本人）
 -------------------------------------------------------------
- cd "G:\マイドライブ\大学院\M1\Projects\Research"
+ 1. 動画をスマホから、その日の data\_sessions\session_…\ の直下へコピー
+    （受信を何回か起動した日は、フォルダごとにそのセットの動画を入れる）
 
- 動画をスマホから data\_sessions\session_…\ の直下へコピー
- （撮影順 = セット順）
+ 2. cd "G:\マイドライブ\大学院\M1\Projects\Research"
+    python scripts\run_pipeline.py
+    → 新しい計測を日ごとに自動で SES 番号をつけて取り込み → 骨格推定 → 特徴量 → 品質レポート
+    → [待ち] と出たら、そのフォルダに動画が入っていない。入れてからもう一度
+    → 最後の「品質レポート」で 要確認 が出たらそこを直す
 
- python scripts\split_session.py --subject S001 --session SES005
-   （重量・回数は受信時に入れたものが自動で入る。直すときだけ --weights 100,110 --reps 5,3）
- python scripts\run_pipeline.py
-   → 最後の「品質レポート」で 要確認 が出たらそこを直す
+ （SES 番号を自分で決めたいときだけ: python scripts\split_session.py --session SES004 --src …）
 
 
 ■ 仲間の動画（Google Drive）

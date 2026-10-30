@@ -3,8 +3,6 @@
 
 cd "G:\マイドライブ\大学院\M1\Projects\Research"
 
-# 1. セッションをセット単位に分割（動画は data\_sessions\session_*\ 直下に置いておく。重量・回数は受信時に入力済み）
-python scripts\split_session.py --subject S001 --session SES006
-
-# 2. 骨格推定 → 特徴量 → 集計 → 品質レポート
-python scripts\run_pipeline.py --subject S001
+# 動画を data\_sessions\session_*\ 直下に置いてから、これだけ
+# （新しい計測の取り込み[日ごとに SES 番号を自動] → 骨格推定 → 特徴量 → 集計 → 品質レポート）
+python scripts\run_pipeline.py

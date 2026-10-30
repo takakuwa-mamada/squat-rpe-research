@@ -31,9 +31,13 @@
    all       テストの全セット
    rpe>=6    RPE 6 以上のセットだけ（実際にトレーニングで使う範囲。主結果。--eval-min-rpe で変更）
    ※ RPE 5 以下は申告がぶれやすい（限界から遠いほど RIR の見積もりがずれる）ため、主結果から外す
+ 学習に使えないセット（データの欠け・レップの取り違え）:
+   IMU が使えないセットは IMU を使う条件から、動画が使えないセットは動画を使う条件から外す
+   （学習にもテストにも使わない。context の条件には残る）。基準は quality_checks.py（品質レポートと同じ）。
+   外したセットと理由は report.md の「学習から外したセット」に出す。
 
  出力: models/<日時>/
-   report.md          結果のまとめ（表・図へのリンク・データの内訳・学習データの範囲の比較）
+   report.md          結果のまとめ（表・図へのリンク・データの内訳・外したセット・学習データの範囲の比較）
    results.csv        方式 × 条件 × モデル × 学習の範囲 × 評価の範囲 の MAE / RMSE / ±0.5・±1.0 以内率
    curves.csv         方式 C・D の k ごとの結果（学習の範囲・評価の範囲つき）
    predictions.csv    全予測（どのフォールドで予測したか付き）
@@ -72,6 +76,8 @@ from sklearn.linear_model import LinearRegression, RidgeCV
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.base import clone
+
+from quality_checks import exclusion_reasons     # 学習に使えないセットの基準（品質レポートと共通）
 
 warnings.filterwarnings("ignore")
 plt.rcParams["font.family"] = ["Yu Gothic", "Meiryo", "MS Gothic", "sans-serif"]
@@ -115,20 +121,23 @@ def build_conditions(df: pd.DataFrame, with_context: bool) -> dict:
     """条件名 → {cols, key, models}"""
     ctx_w = "pct_1rm" if ("pct_1rm" in df and df["pct_1rm"].notna().mean() >= 0.8) else "weight_kg"
     context = [ctx_w, "reps_completed"]
+    # needs: その条件が使うデータ。学習に使えない（quality_checks.py で外す）セットはその条件から外す
     conds = {
-        "context":        {"cols": context, "key": context, "models": ["linear", "hgb"]},
-        "imu_velocity":   {"cols": [IMU_KEY], "key": [IMU_KEY], "models": ["linear"]},
-        "imu_all":        {"cols": IMU_FEATURES, "key": [IMU_KEY], "models": ["ridge", "rf", "hgb"]},
-        "video_velocity": {"cols": [VIDEO_KEY], "key": [VIDEO_KEY], "models": ["linear"]},
-        "video_all":      {"cols": VIDEO_FEATURES, "key": [VIDEO_KEY], "models": ["ridge", "rf", "hgb"]},
+        "context":        {"cols": context, "key": context, "models": ["linear", "hgb"], "needs": []},
+        "imu_velocity":   {"cols": [IMU_KEY], "key": [IMU_KEY], "models": ["linear"], "needs": ["imu"]},
+        "imu_all":        {"cols": IMU_FEATURES, "key": [IMU_KEY], "models": ["ridge", "rf", "hgb"],
+                           "needs": ["imu"]},
+        "video_velocity": {"cols": [VIDEO_KEY], "key": [VIDEO_KEY], "models": ["linear"], "needs": ["video"]},
+        "video_all":      {"cols": VIDEO_FEATURES, "key": [VIDEO_KEY], "models": ["ridge", "rf", "hgb"],
+                           "needs": ["video"]},
         "imu+video":      {"cols": IMU_FEATURES + VIDEO_FEATURES, "key": [IMU_KEY, VIDEO_KEY],
-                           "models": ["ridge", "rf", "hgb"]},
+                           "models": ["ridge", "rf", "hgb"], "needs": ["imu", "video"]},
     }
     if with_context:
         for name in ["imu_velocity", "imu_all", "video_velocity", "video_all", "imu+video"]:
             c = conds[name]
             conds[f"{name}+ctx"] = {"cols": c["cols"] + context, "key": c["key"] + context,
-                                   "models": ["ridge", "hgb"]}
+                                   "models": ["ridge", "hgb"], "needs": c["needs"]}
     return conds
 
 
@@ -202,7 +211,21 @@ def label_eval(name: str) -> str:
 
 
 def eligible(df, cond) -> pd.DataFrame:
-    return df.dropna(subset=[c for c in cond["key"] if c in df] + ["rpe"])
+    """その条件で使えるセット: 要の列と RPE があり、使うデータ（IMU / 動画）が学習から外されていない"""
+    d = df.dropna(subset=[c for c in cond["key"] if c in df] + ["rpe"])
+    for part in cond.get("needs", []):
+        col = f"excl_{part}"
+        if col in d:
+            d = d[d[col].fillna("") == ""]
+    return d
+
+
+def mark_unusable(df: pd.DataFrame) -> pd.DataFrame:
+    """セットごとに、学習から外す理由を excl_imu / excl_video に入れる（空 = 使える）"""
+    reasons = [exclusion_reasons(r) for r in df.to_dict("records")]
+    df["excl_imu"] = [" / ".join(x["imu"]) for x in reasons]
+    df["excl_video"] = [" / ".join(x["video"]) for x in reasons]
+    return df
 
 
 def sessions_in_order(d: pd.DataFrame) -> list:
@@ -461,6 +484,18 @@ def main():
     if len(df) < 5:
         sys.exit(f"[ERROR] RPE のある試技が {len(df)} 件しかありません（最低 5 件）")
 
+    # 学習に使えないセット（データの欠け・レップの取り違え）: そのデータを使う条件だけから外す
+    df = mark_unusable(df)
+    excluded = df[(df["excl_imu"] != "") | (df["excl_video"] != "")]
+    if len(excluded):
+        print(f"[除外] 学習に使えないデータ: IMU {int((df['excl_imu'] != '').sum())} セット、"
+              f"動画 {int((df['excl_video'] != '').sum())} セット（そのデータを使う条件だけから外す）")
+        for r in excluded.to_dict("records"):
+            for part, name in (("imu", "IMU"), ("video", "動画")):
+                if r[f"excl_{part}"]:
+                    print(f"  {r['subject_id']}/{r['session_id']} set{int(r['set_no']):02d}"
+                          f"（RPE {r['rpe']:g}）{name}: {r[f'excl_{part}']}")
+
     out_dir = Path(args.output_dir) / datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
     conds = build_conditions(df, args.with_context)
@@ -479,11 +514,14 @@ def main():
     print(f"[範囲] 学習: {', '.join(label_train(t) for t in train_sets)}　"
           f"評価: {', '.join(label_eval(e) for e in eval_sets)}（主結果: {label_eval(main_eval)}）")
 
-    # データの内訳
+    # データの内訳（imu / video = 学習に使えるセット数、*_excluded = データの欠けなどで外したセット数）
+    df["use_imu"] = (df[IMU_KEY].notna() if IMU_KEY in df else False) & (df["excl_imu"] == "")
+    df["use_video"] = (df[VIDEO_KEY].notna() if VIDEO_KEY in df else False) & (df["excl_video"] == "")
     inv = (df.groupby("subject_id")
            .agg(sessions=("session_id", "nunique"), trials=("rpe", "size"),
-                imu=(IMU_KEY, lambda s: int(s.notna().sum())) if IMU_KEY in df else ("rpe", lambda s: 0),
-                video=(VIDEO_KEY, lambda s: int(s.notna().sum())) if VIDEO_KEY in df else ("rpe", lambda s: 0),
+                imu=("use_imu", "sum"), video=("use_video", "sum"),
+                imu_excluded=("excl_imu", lambda s: int((s != "").sum())),
+                video_excluded=("excl_video", lambda s: int((s != "").sum())),
                 rpe_min=("rpe", "min"), rpe_max=("rpe", "max"))
            .reset_index())
     print("[DATA]\n" + inv.to_string(index=False))
@@ -567,7 +605,16 @@ def main():
              f"入力: `{Path(args.input).name}`　試技 {len(df)}　被験者 {df['subject_id'].nunique()} 人", "",
              f"主結果は「学習: {label_train(MAIN_TRAIN)}／評価: {label_eval(main_eval)}」。"
              f"学習データの範囲の比較は後半の表。", "",
-             "## データの内訳", "", md_table(inv), ""]
+             "## データの内訳", "",
+             "imu / video は学習に使えるセット数、*_excluded はデータの欠けなどで外したセット数。", "",
+             md_table(inv), ""]
+    if len(excluded):
+        tab = excluded[["subject_id", "session_id", "date", "set_no", "rpe", "excl_imu", "excl_video"]]
+        tab = tab.rename(columns={"excl_imu": "IMU を外した理由", "excl_video": "動画を外した理由"})
+        lines += ["## 学習から外したセット", "",
+                  "データが欠けている・レップを取り違えているセットは、そのデータ（IMU / 動画）を使う条件の"
+                  "学習とテストから外した（context の条件には残る）。基準は `quality_checks.py`（品質レポートと同じ）。",
+                  "", md_table(tab), ""]
     if not res_main.empty:
         for sch, t in titles.items():
             r = res_main[res_main["scheme"] == sch]
@@ -606,7 +653,8 @@ def main():
         lines += [f"## 特徴量重要度（{k[4:]}）", "", f"![]({figs[k]})", ""]
     lines += ["## 注意", "",
               "- n が小さい結果は参考値。MAE の差が小さいときは結論を出さない。",
-              "- IMU の条件は IMU のある試技（本人）だけで評価しているので、動画の条件と n が違う。",
+              "- IMU の条件は IMU が使える試技（本人）だけ、動画の条件は動画が使える試技だけで評価しているので、"
+              "条件ごとに n が違う。",
               "- 同じセッションのセットが学習とテストにまたがることはない。",
               f"- RPE {args.eval_min_rpe:g} 未満は申告がぶれやすい（限界から遠いほど RIR の見積もりがずれる）ので、"
               "主結果の評価から外している。",
