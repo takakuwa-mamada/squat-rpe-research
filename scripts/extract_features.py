@@ -101,8 +101,15 @@ def _nanmean(arrs):
 
 
 def _nanstat(fn, x):
+    """
+    NaN を除いて統計量を計算する（全部 NaN なら NaN）。
+    以前は NaN を除かずに fn を呼んでいたため、検出の弱いフレームが 0.3 秒以上続いて
+    NaN が 1 つでも残ると、体の大きさ（BL）や立位の高さが NaN になり、
+    「body too small or not detected」で骨格特徴がまるごと欠損していた（2026-10-30 修正）。
+    """
     x = np.asarray(x, dtype=float)
-    if x.size == 0 or np.all(np.isnan(x)):
+    x = x[~np.isnan(x)]
+    if x.size == 0:
         return float("nan")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
