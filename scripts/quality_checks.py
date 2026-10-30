@@ -18,7 +18,9 @@
          ／速度低下が −10 % 未満（ラックインをレップと数えたなど。2026-10-20 set02 で発生）
  要確認として出すだけ（学習には使う）
    キーポイントの信頼度が低い、M5 の向き（速度は 3 軸の合成加速度から出すので向きに依らない）、
-   動画と IMU の時刻合わせが不確か（IMU だけでレップを数えた。回数・速度低下の確認は上のとおり）
+   動画と IMU の時刻合わせが不確か（IMU だけでレップを数えた。回数・速度低下の確認は上のとおり）、
+   IMU に静止区間がない（重力・ドリフトの補正の足場がなく、速度・変位がずれやすい。2026-09-18 S002 set02 で
+   上昇の変位が同じ人のほかのセットより 11〜12 cm 小さく出た。外すかどうかはまだ決めない: 2026-10-31 ユーザー判断）
  ラベル（RPE・重量・回数）の未入力は学習スクリプト側で扱う
    （RPE が無いセットは使わない。重量・回数が無いセットは context の条件から外れる）
 
@@ -129,6 +131,8 @@ def check_set(row) -> list:
         if row.get("imu_rep_source") == "imu" and sr is not None and has_pose(row):
             out.append(Issue("imu", f"動画と IMU の時刻合わせが不確か（r {sr:.2f}・別のずれとの差 "
                                     f"{sm if sm is not None else float('nan'):.2f}）。IMU だけでレップを数えた", False))
+        if _num(row, "imu_n_still") == 0:
+            out.append(Issue("imu", "IMU に静止区間がない（担いでいる間ずっと揺れていた）。速度・変位がずれやすい", False))
         if fs is not None and fs < IMU_FS_MIN:
             out.append(Issue("imu", f"IMU の受信レートが低い（{fs:.0f} Hz）", True))
         if reps is not None and ir is not None and ir != reps:

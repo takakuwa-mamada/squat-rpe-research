@@ -382,7 +382,7 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
     （挙上の直後はすぐラックへ歩くので、ロックアウト後に静止区間が無いことが多い）。
     rep_windows（動画のレップ区間を IMU の時刻に直したもの）があればその区間でレップを取り、
     無ければ IMU だけで数える。時刻は M5 の時計（imu_on_device_clock）。
-    戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "rep_source"}
+    戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "rep_source", "n_still"（静止区間の数）}
     """
     imu_df = imu_on_device_clock(imu_df)
     t = imu_df["timestamp_ms"].to_numpy() / 1000.0   # [s]
@@ -414,7 +414,7 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
             continue
         peaks.append(p_new)
     return {"t": t, "fs": fs, "dt": dt_med, "a": az_dyn_lp, "v": v, "g_ref": g_ref,
-            "peaks": np.array(peaks, dtype=int), "rep_source": rep_source}
+            "peaks": np.array(peaks, dtype=int), "rep_source": rep_source, "n_still": len(anchors)}
 
 
 def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None) -> dict:
@@ -500,6 +500,8 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=N
         "imu_n_samples":              int(n),
         "imu_fs_hz":                  round(recv_hz, 2),   # 受信レート（M5 の時計で数える）
         "imu_gravity_ref_g":          round(g_ref, 4),
+        # 静止区間の数（0 = 担いでいる間ずっと揺れていて、重力・ドリフトの補正の足場がない。要確認）
+        "imu_n_still":                int(m["n_still"]),
         # M5 の向きの確認用（画面が真上なら +1 g 前後）
         "imu_az_median_g":            round(float(np.median(imu_df["az_g"])), 3),
         "imu_total_time_s":           round(total_time, 3),
@@ -564,17 +566,15 @@ def _shoulder_up_velocity(kp_df, width, height, fs):
     return np.arange(len(sh_y)) / fs, -np.gradient(sh_y) * fs
 
 
-def estimate_offset(t_a, v_a, t_b, v_b, rate=SYNC_RATE_HZ, min_overlap=SYNC_MIN_OVERLAP) -> dict:
+def offset_curve(t_a, v_a, t_b, v_b, rate=SYNC_RATE_HZ, min_overlap=SYNC_MIN_OVERLAP):
     """
-    波形 a（動画）を b（IMU）の上で滑らせ、相関がいちばん高いずれを返す。
-      sync_offset_s : b の時刻 = a の時刻 + これ
-      sync_r        : そのずれでの相関係数
-      sync_margin   : 1 秒以上離れたずれでの最大の相関との差（小さいと 1 レップずれの恐れ）
+    波形 a（動画）を b（IMU）の上で滑らせたときの、ずれ [s]（b の時刻 = a の時刻 + ずれ）ごとの相関係数。
+    戻り値: (ずれ の配列, 相関 の配列)。重ねられなければ (None, None)
     """
     ga = np.arange(t_a[0], t_a[-1], 1.0 / rate)
     gb = np.arange(t_b[0], t_b[-1], 1.0 / rate)
     if len(ga) < rate or len(gb) < rate:
-        return {}
+        return None, None
     a, b = np.interp(ga, t_a, v_a), np.interp(gb, t_b, v_b)
     na, nb = len(a), len(b)
     m_min = max(int(rate), int(min_overlap * min(na, nb)))
@@ -590,12 +590,24 @@ def estimate_offset(t_a, v_a, t_b, v_b, rate=SYNC_RATE_HZ, min_overlap=SYNC_MIN_
         lags.append(k)
         rs.append(float(np.mean((x - x.mean()) * (y - y.mean())) / (sx * sy)))
     if not rs:
+        return None, None
+    return gb[0] + np.array(lags) / rate - ga[0], np.array(rs)
+
+
+def estimate_offset(t_a, v_a, t_b, v_b, rate=SYNC_RATE_HZ, min_overlap=SYNC_MIN_OVERLAP) -> dict:
+    """
+    波形 a（動画）を b（IMU）の上で滑らせ、相関がいちばん高いずれを返す。
+      sync_offset_s : b の時刻 = a の時刻 + これ
+      sync_r        : そのずれでの相関係数
+      sync_margin   : 1 秒以上離れたずれでの最大の相関との差（小さいと 1 レップずれの恐れ）
+    """
+    shifts, rs = offset_curve(t_a, v_a, t_b, v_b, rate, min_overlap)
+    if shifts is None:
         return {}
-    lags, rs = np.array(lags), np.array(rs)
     i = int(np.argmax(rs))
-    far = np.abs(lags - lags[i]) > rate                 # 1 秒以上離れたずれ
+    far = np.abs(shifts - shifts[i]) > 1.0 + 0.5 / rate   # 1 秒以上離れたずれ（刻みの丸めの分だけ余裕）
     second = float(np.max(rs[far])) if far.any() else -1.0
-    return {"sync_offset_s": round(float(gb[0] + lags[i] / rate - ga[0]), 3),
+    return {"sync_offset_s": round(float(shifts[i]), 3),
             "sync_r": round(float(rs[i]), 3),
             "sync_margin": round(float(rs[i] - second), 3)}
 

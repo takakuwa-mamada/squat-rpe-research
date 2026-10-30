@@ -528,6 +528,17 @@ def test_quality_notes_failed_sync_without_excluding():
     assert exclusion_reasons(row) == {"imu": [], "video": []}
 
 
+def test_quality_notes_imu_without_still_period():
+    """IMU に静止区間がないセットは要確認として出すが、学習からは外さない（2026-10-31 ユーザー判断）"""
+    from quality_checks import check_set, exclusion_reasons
+    row = {"rpe": 9, "weight_kg": 160, "reps_completed": 1, "modality": "imu+video", "pose_available": True,
+           "pose_n_reps_detected": 1, "pose_first_rep_mcv_bl": 0.3, "imu_n_reps_detected": 1,
+           "imu_first_rep_mcv_mps": 0.3, "imu_rep_source": "video", "imu_n_still": 0}
+    assert any("静止区間" in i.text and not i.exclude for i in check_set(row))
+    assert exclusion_reasons(row) == {"imu": [], "video": []}
+    assert not any("静止区間" in i.text for i in check_set({**row, "imu_n_still": 2}))
+
+
 # ---------------------------------------------------------------------------
 # IMU の時刻は M5 の時計で・動画と IMU のレップ単位の比較（2026-10-31）
 # ---------------------------------------------------------------------------
@@ -553,6 +564,7 @@ def test_imu_uses_device_clock_not_receive_time():
     assert abs(got["imu_last_rep_mcv_mps"] / clean["imu_last_rep_mcv_mps"] - 1) < 0.02
     assert abs(got["imu_first_rep_concentric_s"] - clean["imu_first_rep_concentric_s"]) < 0.03
     assert 97.0 < got["imu_fs_hz"] < 99.0                     # 受信レート: 2 % 欠けた分だけ下がる
+    assert got["imu_n_still"] >= 1                            # 1 回目の前に立っている時間がある
     assert abs(got["_imu_reps"][0]["peak_t_s"] - clean["_imu_reps"][0]["peak_t_s"]) < 0.03   # 時刻の基準は同じ
 
 
