@@ -75,6 +75,25 @@ METRICS = [
     ("rom", "上昇の変位", "cm", 100.0),
     ("depth", "深さ", "cm", 100.0),
 ]
+# 図に書く説明（何の秒数・速さ・距離か）
+METRIC_DESC = {
+    "ascent_s": "いちばん下から立ち上がりきるまでの秒数",
+    "mcv": "立ち上がる間の平均の速さ（上向き）",
+    "peak": "立ち上がる間でいちばん速い瞬間の速さ",
+    "rom": "立ち上がる間に上がった距離",
+    "depth": "しゃがむ前の立った位置から、いちばん下までの距離",
+}
+FIG_NOTE = ("図の見方\n"
+            "・1 点 = 1 レップ（1 回のしゃがみ）\n"
+            "・同じレップを 2 通りで測った:\n"
+            "    動画 = 肩の点の上下の動き（身長から m に換算）\n"
+            "    IMU = バーにつけたセンサー（基準）\n"
+            "・縦軸 = 動画 − IMU（+ なら動画の方が大きい）\n"
+            "・横軸 = その値の大きさ（2 つの平均）\n"
+            "・実線 = ずれの平均（0 から離れるほど、\n"
+            "    動画がいつも同じ向きにずれている）\n"
+            "・破線 = 95 % のレップが入る範囲\n"
+            "    （1 レップごとの誤差の幅）")
 
 
 # ---------------------------------------------------------------------------
@@ -231,24 +250,27 @@ def _colors(reps):
 
 def fig_bland_altman(reps, summ, out):
     col = _colors(reps)
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8.5))
     axes.flat[-1].axis("off")
+    axes.flat[-1].text(0.02, 0.98, FIG_NOTE, va="top", ha="left", fontsize=10, transform=axes.flat[-1].transAxes)
     for ax, (k, name, unit, _) in zip(axes.flat, METRICS):
         s = summ[summ["metric"] == k].iloc[0]
         for sid, g in reps.groupby("subject_id"):
             ax.scatter((g[f"imu_{k}"] + g[f"vid_{k}"]) / 2, g[f"diff_{k}"], s=16, alpha=0.75,
                        color=col[sid], label=sid)
+        title = f"{name} [{unit}]: {METRIC_DESC[k]}"
         if s.get("n", 0) >= 2:
             for y, ls in ((s["bias"], "-"), (s["loa_low"], "--"), (s["loa_high"], "--")):
                 ax.axhline(y, color="k", lw=0.9, ls=ls)
-            ax.set_title(f"{name}: 差 {s['bias']:+.3f} {unit}（95 % 一致限界 {s['loa_low']:+.3f}〜{s['loa_high']:+.3f}、"
-                         f"n={int(s['n'])}）", fontsize=9)
+            title += (f"\nずれの平均 {s['bias']:+.3f} {unit}、95 % のレップは {s['loa_low']:+.3f}〜{s['loa_high']:+.3f}"
+                      f"（n={int(s['n'])}）")
+        ax.set_title(title, fontsize=9)
         ax.axhline(0, color="gray", lw=0.6)
-        ax.set_xlabel(f"IMU と動画の平均 [{unit}]")
+        ax.set_xlabel(f"その値の大きさ（IMU と動画の平均）[{unit}]")
         ax.set_ylabel(f"動画 − IMU [{unit}]")
         ax.grid(alpha=0.3)
     axes.flat[0].legend(fontsize=8)
-    fig.suptitle("動画（肩）と IMU（バー）のレップごとの一致（Bland–Altman、参考値）")
+    fig.suptitle("動画（肩）と IMU（バー）のレップごとの一致（Bland–Altman 図、参考値）")
     plt.tight_layout()
     fig.savefig(out, dpi=130)
     plt.close(fig)
@@ -270,7 +292,7 @@ def fig_identity(reps, summ, out):
         ax.set_ylim(lo - pad, hi + pad)
         ax.set_aspect("equal")
         r_txt = f"r = {s['r']:.2f}" if s.get("n", 0) >= 2 and not np.isnan(s.get("r", np.nan)) else ""
-        ax.set_title(f"{name} [{unit}]  {r_txt}", fontsize=10)
+        ax.set_title(f"{name} [{unit}]  {r_txt}\n{METRIC_DESC[k]}", fontsize=10)
         ax.set_xlabel(f"IMU [{unit}]")
         ax.set_ylabel(f"動画 [{unit}]")
         ax.grid(alpha=0.3)
