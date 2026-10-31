@@ -107,7 +107,7 @@ def video_motion(kp_df, width, height, fps, height_cm, expected_reps=None):
     fs = ef._pose_fs(kp_df, fps)
     i0, i1, c0, c1 = ef._set_region(kp_df, width, height, fs, expected_reps)
     kp = kp_df.iloc[i0:i1].reset_index(drop=True)
-    pts = ef._load_points(kp, width, height, fs)
+    pts = ef._load_points(kp, width, height, fs, ef._other_person_frames(kp_df, width, height, fs)[i0:i1])
     sh_y = ef._nanmean([pts["left_shoulder"][1], pts["right_shoulder"][1]])
     an_y = ef._nanmean([pts["left_ankle"][1], pts["right_ankle"][1]])
     cs = slice(c0 - i0, c1 - i0)

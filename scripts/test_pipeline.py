@@ -528,6 +528,67 @@ def test_quality_notes_failed_sync_without_excluding():
     assert exclusion_reasons(row) == {"imu": [], "video": []}
 
 
+def with_passerby(kp, t0=1.0, dur=0.47, shoulder_conf=0.9, hip_y=0.5):
+    """カメラの前を人が横切る（2026-10-29 set01・10-20 set02 と同じ形）: dur 秒だけ追跡がカメラの近くの人に移る。
+    その人の肩は画面の最上部、腰は hip_y、足首は画面の下端（信頼度 0）。最後の 2 コマは肩が見えず腰だけ残る。
+    shoulder_conf を 0.3 未満にすると、肩が見えず腰・膝だけ見える横切り（10/20 set02）"""
+    out = kp.copy()
+    idx = np.where((out["time_s"] >= t0) & (out["time_s"] < t0 + dur))[0]
+    rng = np.random.default_rng(7)
+    for name in COCO:
+        part = name.split("_")[-1]
+        y = {"shoulder": 0.04, "hip": hip_y, "knee": 0.75, "ankle": 0.98}.get(part, 0.02)
+        conf = {"shoulder": shoulder_conf, "hip": 0.8, "knee": 0.5, "ankle": 0.0}.get(part, 0.3)
+        out.loc[idx, f"{name}_x"] = (0.75 if name.startswith("left") else 0.45) + rng.normal(0, 0.02, len(idx))
+        out.loc[idx, f"{name}_y"] = y + rng.normal(0, 0.01, len(idx))
+        out.loc[idx, f"{name}_conf"] = conf
+    for c in ("left_shoulder_conf", "right_shoulder_conf"):
+        out.loc[idx[-2:], c] = 0.1
+    return out, idx
+
+
+def test_pose_ignores_frames_tracking_a_passerby():
+    """追跡が横切った人に移ったコマ（腰・足首も）を使わない。本人の速い動きのコマは弾かない。
+    横切った人の足首で「足元切れ」と誤判定しない（10/20 set02 で発生）"""
+    kp, _ = make_keypoints(n_reps=5)
+    assert not ef._other_person_frames(kp, 720, 1280, 30.0).any()        # しゃがみの速い動きは弾かない
+    bad, idx = with_passerby(kp)
+    other = ef._other_person_frames(bad, 720, 1280, 30.0)
+    assert set(np.where(other)[0]) == set(idx)                            # 肩が見えない最後の 2 コマも
+    a = ef.compute_pose_features(kp, 720, 1280, 30.0, view="front", expected_reps=5)
+    b = ef.compute_pose_features(bad, 720, 1280, 30.0, view="front", expected_reps=5)
+    assert b["pose_other_person_frames"] == len(idx)
+    assert b["pose_n_reps_detected"] == 5
+    assert abs(b["pose_first_rep_mcv_bl"] / a["pose_first_rep_mcv_bl"] - 1) < 0.03
+    assert abs(b["pose_mean_depth_bl"] / a["pose_mean_depth_bl"] - 1) < 0.03
+    assert b["pose_ankle_y_max_norm"] < 0.97
+    from quality_checks import check_set
+    row = {"rpe": 8, "weight_kg": 90, "reps_completed": 5, "modality": "video", **b}
+    assert any("別の人" in i.text and not i.exclude for i in check_set(row))
+
+
+def test_pose_passerby_seen_only_by_hips():
+    """横切った人の肩が見えず腰・膝だけ見える（10/20 set02 と同じ形）ときも、そのコマを使わない"""
+    kp, _ = make_keypoints(n_reps=5)
+    bad, idx = with_passerby(kp, shoulder_conf=0.02, hip_y=0.38)
+    assert set(np.where(ef._other_person_frames(bad, 720, 1280, 30.0))[0]) == set(idx)
+    b = ef.compute_pose_features(bad, 720, 1280, 30.0, view="front", expected_reps=5)
+    assert b["pose_other_person_frames"] == len(idx)
+    assert b["pose_ankle_y_max_norm"] < 0.97
+
+
+def test_pose_left_right_swap_is_not_another_person():
+    """本人の肩・腰の左右のラベルが入れ替わっただけのコマ（10/29 set04 に 1 コマずつ 2 回）は別の人としない"""
+    kp, _ = make_keypoints(n_reps=5)
+    sw = kp.copy()
+    idx = np.where((sw["time_s"] >= 2.0) & (sw["time_s"] < 2.5))[0]
+    for part in ("shoulder", "hip"):
+        for c in ("x", "y", "conf"):
+            cols = [f"left_{part}_{c}", f"right_{part}_{c}"]
+            sw.loc[idx, cols] = sw.loc[idx, cols[::-1]].to_numpy()
+    assert not ef._other_person_frames(sw, 720, 1280, 30.0).any()
+
+
 def test_quality_notes_imu_without_still_period():
     """IMU に静止区間がないセットは要確認として出すが、学習からは外さない（2026-10-31 ユーザー判断）"""
     from quality_checks import check_set, exclusion_reasons

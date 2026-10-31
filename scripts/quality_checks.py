@@ -20,7 +20,8 @@
    キーポイントの信頼度が低い、M5 の向き（速度は 3 軸の合成加速度から出すので向きに依らない）、
    動画と IMU の時刻合わせが不確か（IMU だけでレップを数えた。回数・速度低下の確認は上のとおり）、
    IMU に静止区間がない（重力・ドリフトの補正の足場がなく、速度・変位がずれやすい。2026-09-18 S002 set02 で
-   上昇の変位が同じ人のほかのセットより 11〜12 cm 小さく出た。外すかどうかはまだ決めない: 2026-10-31 ユーザー判断）
+   上昇の変位が同じ人のほかのセットより 11〜12 cm 小さく出た。外すかどうかはまだ決めない: 2026-10-31 ユーザー判断）、
+   骨格の追跡が別の人に移ったコマがあった（カメラの前を人が横切ったなど。そのコマは特徴量に使っていない）
  ラベル（RPE・重量・回数）の未入力は学習スクリプト側で扱う
    （RPE が無いセットは使わない。重量・回数が無いセットは context の条件から外れる）
 
@@ -105,6 +106,10 @@ def check_set(row) -> list:
         vl = _num(row, "pose_velocity_loss_pct")
         if nan_ratio is not None and nan_ratio > POSE_NAN_MAX:
             out.append(Issue("video", f"人物を検出できないフレームが {nan_ratio:.0%}", True))
+        other = _num(row, "pose_other_person_frames")
+        if other:
+            out.append(Issue("video", f"骨格の追跡が別の人に移ったコマ {int(other)} を使わなかった（カメラの前を人が横切ったなど）",
+                             False))
         if vis is not None and vis < POSE_VIS_MIN:
             out.append(Issue("video", f"キーポイントの信頼度が低い（{vis:.2f}）", False))
         if ankle is not None and ankle > ANKLE_Y_MAX:

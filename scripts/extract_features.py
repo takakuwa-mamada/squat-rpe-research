@@ -677,14 +677,82 @@ def _fill_smooth(sig, fs, max_gap_s=0.3):
     return arr
 
 
-def _load_points(kp_df, w, h, fs):
-    """キーポイントをピクセル座標（縦横比を保った座標）に戻し、平滑化して返す"""
+OTHER_JUMP_SW = 0.5        # 1 コマで肩・腰がこれ（肩幅の倍数）より大きく動いたら「瞬間移動」= 別の人に移った境目
+OTHER_MOVE_SW_PER_S = 3.0  # 点が見えていなかったコマがあるときに足す、その間に動ける量 [肩幅/秒]（≒ 1.2 m/s）
+OTHER_MAX_S = 1.0          # 瞬間移動で区切られたひと続きがこれより短ければ別の人（横切る人は 1 秒以内に通り過ぎる）
+
+
+def _other_person_frames(kp_df, w, h, fs) -> np.ndarray:
+    """
+    骨格の追跡が挙上者から別の人（カメラの前を横切った人など）に移ったコマ（True）。2026-10-31 追加。
+
+    pose_extract_yolo.py は「前のコマで選んだ人に最も近い人」を選ぶので、横切った人が挙上者を隠すと
+    その人に移る（10/29 set01: 0.47 s、肩が 1 コマで 387 px = 肩幅の 2.8 倍 上へ跳んだ。10/20 set02 も 0.43 s）。
+    1. 人は 1 コマ（1/30 s）で肩幅の半分も動けない（実データのふつうの動きは 1 コマで最大 0.13 倍）。
+       肩・腰の 4 点のどれかが、前に見えた位置から 肩幅 × (OTHER_JUMP_SW + OTHER_MOVE_SW_PER_S × 見えなかった秒)
+       より大きく動いたら「瞬間移動」として、そこで区切る。腰も見るのは、横切った人の肩が見えず腰だけ見える
+       ことがあるため（10/20 set02。肩だけだと、戻ってきた本人を同じひと続きとみなした）。
+       前の位置は左右の同じ部位（左肩と右肩など）の近い方と比べる。左右のラベルの取り違えは同じ人なので
+       瞬間移動にしない（10/29 set04 に 1 コマの取り違えが 2 回。肩の高さはほぼ変わらない）。
+    2. 区切られたひと続きのうち OTHER_MAX_S 秒より短いものを別の人とする（本人は長く続けて写っている）。
+       全部が短いとき（検出がずっと不安定など）は何も弾かない。
+    肩幅は渡したコマ全体の中央値（ほとんどのコマは本人なので、本人の肩幅になる）。
+    4 点とも見えないコマは、直前のひと続きに含める（別の人の区間の中なら、その人の足首なども使わない）。
+    「最初に見えた人を本人」とはしないので、背景の人から始まる切っていない動画でも本人を弾かない。
+    動画全体で判定すること（セットの区間で切ると、区間の端の本人の続きが短く見えて弾かれうる）。
+    """
+    pt = {}
+    for k in ("left_shoulder", "right_shoulder", "left_hip", "right_hip"):
+        x = kp_df[f"{k}_x"].to_numpy(dtype=float) * w
+        y = kp_df[f"{k}_y"].to_numpy(dtype=float) * h
+        bad = ~(kp_df[f"{k}_conf"].to_numpy(dtype=float) >= POSE_CONF_MIN)
+        x[bad] = np.nan
+        y[bad] = np.nan
+        pt[k] = (x, y)
+    n = len(kp_df)
+    out = np.zeros(n, dtype=bool)
+    unit = _nanstat(np.median, np.hypot(pt["left_shoulder"][0] - pt["right_shoulder"][0],
+                                        pt["left_shoulder"][1] - pt["right_shoulder"][1]))
+    if np.isnan(unit) or unit <= 0:
+        return out
+    # 1. 瞬間移動で区切る: seg[i] = そのコマが入るひと続きの番号
+    pair = {k: tuple(f"{s}_{k.split('_', 1)[1]}" for s in ("left", "right")) for k in pt}
+    seg = np.zeros(n, dtype=int)
+    last, k_seg = {}, 0       # last: 点ごとの、前に見えたコマ (番号, x, y)
+
+    def jumped(i, k, x, y):
+        prev = [last[j] for j in pair[k] if j in last]
+        return bool(prev) and all(np.hypot(x - px, y - py) / unit
+                                  > OTHER_JUMP_SW + OTHER_MOVE_SW_PER_S * (i - f - 1) / fs for f, px, py in prev)
+
+    for i in range(n):
+        cur = {k: (pt[k][0][i], pt[k][1][i]) for k in pt if not np.isnan(pt[k][0][i])}
+        if any(jumped(i, k, x, y) for k, (x, y) in cur.items()):
+            k_seg += 1
+        for k, (x, y) in cur.items():
+            last[k] = (i, x, y)
+        seg[i] = k_seg
+    # 2. 短いひと続きを別の人とする
+    durations = np.bincount(seg) / fs
+    if durations.max() < OTHER_MAX_S:
+        return out
+    return durations[seg] < OTHER_MAX_S
+
+
+def _load_points(kp_df, w, h, fs, other=None):
+    """
+    キーポイントをピクセル座標（縦横比を保った座標）に戻し、平滑化して返す。
+    信頼度の低い点と、追跡が別の人に移ったコマ（_other_person_frames）の点は欠損として扱う（つなぎ方は _fill_smooth）。
+    other: 動画全体で判定したものを切り出して渡す（None なら kp_df だけで判定）
+    """
+    if other is None:
+        other = _other_person_frames(kp_df, w, h, fs)
     pts = {}
     for name in POSE_POINTS:
         x = kp_df[f"{name}_x"].to_numpy(dtype=float) * w
         y = kp_df[f"{name}_y"].to_numpy(dtype=float) * h
         c = kp_df[f"{name}_conf"].to_numpy(dtype=float)
-        bad = ~(c >= POSE_CONF_MIN)
+        bad = ~(c >= POSE_CONF_MIN) | other
         x[bad] = np.nan
         y[bad] = np.nan
         pts[name] = (_fill_smooth(x, fs), _fill_smooth(y, fs))
@@ -828,8 +896,10 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
         return _pose_empty("video size unknown", n)
     fs = _pose_fs(kp_df, fps)
     i0, i1, c0, c1 = _set_region(kp_df, width, height, fs, expected_reps)
+    other = _other_person_frames(kp_df, width, height, fs)
     out = _pose_core(kp_df.iloc[i0:i1].reset_index(drop=True), width, height, fs, view=view,
-                     expected_reps=expected_reps, height_cm=height_cm, t0=i0 / fs, core=(c0 - i0, c1 - i0))
+                     expected_reps=expected_reps, height_cm=height_cm, t0=i0 / fs, core=(c0 - i0, c1 - i0),
+                     other=other[i0:i1])
     out["pose_n_frames"] = int(n)
     out["pose_set_start_s"] = _r(i0 / fs, 3)
     out["pose_set_end_s"] = _r(i1 / fs, 3)
@@ -837,15 +907,20 @@ def compute_pose_features(kp_df: Optional[pd.DataFrame], width=None, height=None
 
 
 def _pose_core(kp_df: pd.DataFrame, width, height, fs, view="front", expected_reps=None,
-               height_cm=None, t0=0.0, core=None) -> dict:
+               height_cm=None, t0=0.0, core=None, other=None) -> dict:
     """
     compute_pose_features の本体。kp_df はセットの区間だけ、t0 はその始まりの動画上の時刻 [s]、
-    core は体の大きさ・立位の高さ・足元を測る区間（kp_df の中のフレーム番号 (始まり, 終わり)）
+    core は体の大きさ・立位の高さ・足元を測る区間（kp_df の中のフレーム番号 (始まり, 終わり)）、
+    other は追跡が別の人に移ったコマ（動画全体で判定したものの、この区間の分）
     """
     n = len(kp_df)
 
     # 品質（足元の確認はセットの芯の区間だけ。ラックの近くで大きく写る時間を入れない）
     cs = slice(*core) if core else slice(None)
+    # 追跡が別の人に移ったコマ。足元の確認にも入れない（横切った人の足首が画面の下端にあり、
+    # 10/20 set02 が「足元切れ」と誤判定されていた: 99 % 点 0.974、除くと 0.753。2026-10-31）
+    if other is None:
+        other = _other_person_frames(kp_df, width, height, fs)
     valid = kp_df["left_hip_x"].notna().to_numpy()
     conf = np.vstack([kp_df[f"{p}_conf"].to_numpy(dtype=float) for p in POSE_POINTS])
     vis = conf.mean(axis=0)[valid]
@@ -855,13 +930,15 @@ def _pose_core(kp_df: pd.DataFrame, width, height, fs, view="front", expected_re
         "pose_nan_ratio":           _r(1.0 - valid.mean()),
         "pose_key_visibility_mean": _r(vis.mean() if len(vis) else np.nan),
         "pose_key_visibility_min":  _r(vis.min() if len(vis) else np.nan),
+        # 追跡が別の人に移って使わなかったコマ数（セットの区間の中。要確認）
+        "pose_other_person_frames": int(other.sum()),
         # 全身が画面に収まっているか（足首・頭が画面端で切れていない）
         "pose_ankle_y_max_norm":    _r(np.nanpercentile(
-            kp_df[["left_ankle_y", "right_ankle_y"]].to_numpy(dtype=float)[cs], 99)
-            if valid[cs].any() else np.nan),
+            kp_df[["left_ankle_y", "right_ankle_y"]].to_numpy(dtype=float)[cs][~other[cs]], 99)
+            if (valid[cs] & ~other[cs]).any() else np.nan),
     }
 
-    pts = _load_points(kp_df, width, height, fs)
+    pts = _load_points(kp_df, width, height, fs, other)
     lsx, lsy = pts["left_shoulder"];  rsx, rsy = pts["right_shoulder"]
     lhx, lhy = pts["left_hip"];       rhx, rhy = pts["right_hip"]
     lkx, lky = pts["left_knee"];      rkx, rky = pts["right_knee"]
