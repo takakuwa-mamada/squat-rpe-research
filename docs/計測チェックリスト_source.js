@@ -104,7 +104,7 @@ const children = [
   check("テザリング ON → PC を接続"),
   check("python scripts\\multi_imu_receiver.py を起動"),
   check("M5 の電源 ON → 画面が「PC:xx.xx.xx.xx A」（緑）になる"),
-  check("M5 をシャフト中央に固定（画面が真上を向く向き）"),
+  check("M5 をバーの端（プレートの外側・動画で右側）に固定。画面が真上、毎回同じ位置"),
   check("バーを水平にして az ≒ 1.0g を確認", { bold: true, color: RED }),
   note("−1.0 なら裏返す／0 付近なら 90 度回す。ここを外すと全データが無駄になる。", { color: RED }),
   check("三脚：バーベルの真正面、2.5〜3m、高さ＝腰、スマホは縦向き"),
