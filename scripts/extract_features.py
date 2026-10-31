@@ -664,15 +664,27 @@ POSE_POINTS = ["left_shoulder", "right_shoulder", "left_hip", "right_hip",
 
 
 def _fill_smooth(sig, fs, max_gap_s=0.3):
-    """短い欠損を線形補間し、ローパスで平滑化する（長い欠損は NaN のまま残す）"""
-    s = pd.Series(sig, dtype=float).interpolate(
-        limit=max(1, int(max_gap_s * fs)), limit_area="inside")
-    arr = s.to_numpy()
-    ok = ~np.isnan(arr)
-    if ok.sum() > max(15, int(fs * 0.5)) and fs > 2.5 * POSE_LPF_HZ:
-        filled = pd.Series(arr).ffill().bfill().to_numpy()
-        sm = lowpass(filled, fs, fc=POSE_LPF_HZ)
-        sm[~ok] = np.nan
+    """
+    max_gap_s 秒以下の欠損を直線でつなぎ、ローパスで平滑化する。それより長い欠損と、端の欠損は全部 NaN のまま残す。
+    ローパスにかける前だけ、長い欠損も直線で仮につなぐ（平滑化の後で NaN に戻す）。直前の値のままで埋めると、
+    欠損の終わりの段差が平滑化で直後のコマに漏れる（10/29 set01 の横切りの直後のコマで 3 px）。
+    2026-10-31 修正: 以前は pandas の interpolate(limit=N) を使っていたが、これは「N コマ以下の欠損だけ埋める」ではなく
+    「どの欠損も最初の N コマまで埋める」なので、長い欠損の前半が直線で埋まっていた（10/20 set02・10/29 set01 の横切りのコマ）。
+    N も int(0.3 × fs) の切り捨てで、29.97 fps では 8 コマ（0.27 秒）だった。今は四捨五入で 9 コマ。
+    """
+    s = pd.Series(sig, dtype=float)
+    line = s.interpolate(limit_direction="both").to_numpy()   # 欠損を全部直線で（端は端の値のまま）
+    nan = s.isna().to_numpy()
+    n, lim = len(nan), max(1, int(round(max_gap_s * fs)))
+    edges = np.diff(np.r_[0, nan.astype(int), 0])
+    empty = np.zeros(n, dtype=bool)                          # NaN のまま残すコマ
+    for a, b in zip(np.where(edges == 1)[0], np.where(edges == -1)[0]):
+        if b - a > lim or a == 0 or b == n:
+            empty[a:b] = True
+    arr = np.where(empty, np.nan, line)
+    if (~empty).sum() > max(15, int(fs * 0.5)) and fs > 2.5 * POSE_LPF_HZ:
+        sm = lowpass(line, fs, fc=POSE_LPF_HZ)
+        sm[empty] = np.nan
         return sm
     return arr
 

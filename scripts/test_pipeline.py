@@ -126,6 +126,35 @@ def test_pose_survives_low_confidence_gap():
     assert f["pose_first_rep_mcv_bl"] is not None
 
 
+def test_fill_smooth_leaves_long_gap_empty():
+    """0.3 秒より長い欠損は全部空のまま（2026-10-31 まで、最初の 8 コマが直線で埋まっていた）"""
+    sig = np.linspace(0.0, 100.0, 120)
+    gap = sig.copy()
+    gap[40:54] = np.nan                                   # 14 コマ = 0.47 秒（10/29 set01 の横切りと同じ長さ）
+    out = ef._fill_smooth(gap, 29.97)
+    assert np.isnan(out[40:54]).all()
+    assert not np.isnan(out[:40]).any() and not np.isnan(out[54:]).any()
+
+
+def test_fill_smooth_bridges_gap_up_to_0_3_s():
+    """0.3 秒（29.97 fps で 9 コマ）までの欠損はつなぐ（2026-10-31 まで、切り捨てで 8 コマ = 0.27 秒までだった）"""
+    sig = np.linspace(0.0, 100.0, 120)
+    gap = sig.copy()
+    gap[40:49] = np.nan
+    out = ef._fill_smooth(gap, 29.97)
+    assert not np.isnan(out).any()
+    assert np.allclose(out[40:49], sig[40:49], atol=0.5)
+
+
+def test_fill_smooth_no_step_after_long_gap():
+    """長い欠損の直後のコマが、平滑化で欠損の前の値に引っ張られない（以前は一定の動きで 1 コマ分以上ずれた）"""
+    sig = np.linspace(0.0, 100.0, 120)                    # 1 コマ 0.84 ずつ動く
+    gap = sig.copy()
+    gap[40:54] = np.nan
+    out = ef._fill_smooth(gap, 29.97)
+    assert abs(out[54] - sig[54]) < 0.3
+
+
 def test_pose_rep_cap_by_reported_reps():
     kp, _ = make_keypoints(n_reps=5)
     f = ef.compute_pose_features(kp, 720, 1280, 30.0, view="front", expected_reps=3)
