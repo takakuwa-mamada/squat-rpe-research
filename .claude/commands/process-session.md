@@ -1,6 +1,6 @@
 ---
-description: 計測データ（本人の data/_sessions、または協力者の Google Drive）を取り込み、骨格推定・特徴量・集計・品質レポートまで回す
-argument-hint: （なし）／ remote [共有フォルダのパス]   例: remote "G:\マイドライブ\スクワット研究"
+description: 計測データ（本人の data/_sessions、または協力者から LINE で受け取って data/_remote に保存した動画）を取り込み、骨格推定・特徴量・集計・品質レポートまで回す
+argument-hint: （なし）／ remote
 ---
 
 計測後の処理を行う。引数: $ARGUMENTS
@@ -15,11 +15,15 @@ argument-hint: （なし）／ remote [共有フォルダのパス]   例: remot
    重量・回数を後から入れるときは、取り込まれた `data/S001/SESnnn/meta.json` を直すか
    `python scripts\split_session.py --session SESnnn --src … --weights … --reps …` で作り直す（手入力の値は残る）。
 
-## 協力者（動画のみ）: 引数が `remote [パス]` のとき
+## 協力者（動画のみ）: 引数が `remote` のとき
 
-1. `python scripts\ingest_remote.py --dry-run [--src <パス>]` で取り込み内容を表示し、`[要確認]` があれば
+協力者の動画は LINE で受け取り、ユーザーが `data\_remote\<名前>\<撮った日>\01_100kg 5回 RPE8.mp4` の名前で保存している
+（先頭の番号 = 撮った順、後ろ = 協力者が動画の次に送ってきた1行）。LINE の動画の中の日時は送った時刻なので、順番には番号だけを使う。
+
+1. `python scripts\ingest_remote.py --dry-run` で取り込み内容を表示し、`[要確認]` があれば
    どの人のどのフォルダで何が足りないかをまとめる（本人に聞くための文面も用意する）。
-2. 問題のないものを `python scripts\ingest_remote.py [--src <パス>]` で取り込む。
+   `[注意] 番号が 1 から順に続いていません` が出たら、置き忘れた動画がないかユーザーに確かめる。
+2. 問題のないものを `python scripts\ingest_remote.py` で取り込む（`data\_remote` 以外に置いたときは `--src <パス>`）。
 3. `python scripts\run_pipeline.py`
 
 ## 共通: 報告

@@ -44,10 +44,15 @@
  （SES 番号を自分で決めたいときだけ: python scripts\split_session.py --session SES004 --src …）
 
 
-■ 仲間の動画（Google Drive）
+■ 仲間の動画（LINE で受け取る）
 -------------------------------------------------------------
- python scripts\ingest_remote.py --src "G:\マイドライブ\スクワット研究"
- python scripts\run_pipeline.py
+ 1. LINE の動画を data\_remote\<名前>\<撮った日>\ に保存（例 data\_remote\<名前>\20261105\）
+    名前は「撮った順の番号_動画の次に送られてきた1行」→ 01_100kg 5回 RPE8.mp4
+    ・LINE の動画は保存期間が過ぎると開けなくなるので、届いたら早めに
+    ・初回だけ、送られてきた4行（身長・体重・1RM・歴）を data\_remote\<名前>\プロフィール.txt に貼る
+ 2. python scripts\ingest_remote.py --dry-run    ← 並び順とラベルを確認（コピーしない）
+ 3. python scripts\ingest_remote.py
+ 4. python scripts\run_pipeline.py
    → [要確認] が出た人には LINE で聞く（ラベル抜け・足元切れ など）
 
 

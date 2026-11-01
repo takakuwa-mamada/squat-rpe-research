@@ -159,8 +159,17 @@
   }
   button.copy:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
-  .or { display: grid; gap: 16px; }
-  .or-label { font-family: var(--display); color: var(--accent); font-size: 18px; }
+  /* LINE のトーク画面の例: 1セット = 縦長の動画1本 ＋ すぐ後の1行 */
+  .chat { list-style: none; margin: 0; padding: 14px; display: flex; flex-direction: column; gap: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .chat li { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+  .chat .clip {
+    width: 52px; max-width: 100%; aspect-ratio: 9 / 16;
+    background: var(--ink); color: var(--paper); border-radius: 8px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+    font-size: 11px; line-height: 1.3;
+  }
+  .chat .play { font-size: 16px; }
+  .chat .msg { background: var(--accent); color: var(--card); font-family: var(--mono); font-size: 14px; border-radius: 14px; padding: 4px 12px; }
 
   footer { border-top: 1px solid var(--line); padding-top: 18px; font-size: 14px; color: var(--ink-soft); display: flex; flex-direction: column; gap: 6px; }
 
@@ -175,7 +184,7 @@
     <div class="eyebrow">研究協力のお願い ・ バックスクワット</div>
     <h1>スクワット撮影ガイド</h1>
     <p class="lead">スマホの動画から、スクワットの「きつさ（RPE）」を推定する研究です。
-      <strong>いつものメインセットを撮って送るだけ</strong>。1回あたり +5 分くらいです。</p>
+      <strong>いつものメインセットを撮って、LINE で送るだけ</strong>。1回あたり +5 分くらいです。</p>
     <div class="rules" aria-label="守ってほしい3つ">
       <div class="rule"><b>正面</b><span>バーベルの真正面</span></div>
       <div class="rule"><b>全身</b><span>頭から足先まで</span></div>
@@ -184,16 +193,16 @@
   </header>
 
   <section id="first">
-    <h2><span class="no">1</span>プロフィールを置く<span class="when">初回だけ</span></h2>
-    <p>共有フォルダ（Google Drive）の<strong>自分の名前のフォルダ</strong>に <code>プロフィール.txt</code> を作って、この4行を書いてください。</p>
+    <h2><span class="no">1</span>プロフィールを送る<span class="when">初回だけ</span></h2>
+    <p>LINE で、この4行を送ってください。</p>
     <div class="snippet">
-      <div class="snippet-head"><span>プロフィール.txt</span><button class="copy" type="button" data-target="snip-profile">コピー</button></div>
+      <div class="snippet-head"><span>プロフィール</span><button class="copy" type="button" data-target="snip-profile">コピー</button></div>
       <pre id="snip-profile">身長 175
 体重 80
 1RM 150
 歴 5</pre>
     </div>
-    <p class="note">1RM はスクワットの最大重量（kg、推定でOK）。歴はトレーニング歴（年）。</p>
+    <p class="note">数字は自分の値に書きかえてください。1RM はスクワットの最大重量（kg、推定でOK）。歴はトレーニング歴（年）。</p>
   </section>
 
   <section id="film">
@@ -274,39 +283,23 @@
   </section>
 
   <section id="send">
-    <h2><span class="no">5</span>送り方</h2>
-    <p>共有フォルダの自分のフォルダに<strong>日付のフォルダ</strong>（例 <code>20261005</code>）を作り、その日の動画を入れてください。</p>
-    <div class="ng"><b>Google Drive アプリからアップロード</b>してください。LINE で送ると画質と撮影時刻が消えてしまいます。</div>
-    <p>重量・回数・RPE は <strong>A か B のどちらか</strong>で教えてください。</p>
-    <div class="or">
-      <div class="snippet">
-        <div class="or-label">A　ファイル名を変える</div>
-        <div class="snippet-head"><span>重量kg_回数rep_RPE値</span><button class="copy" type="button" data-target="snip-name">コピー</button></div>
-        <pre id="snip-name">100kg_5rep_RPE8</pre>
-        <p class="note">例: <code>102.5kg_3rep_RPE9.5.mov</code></p>
-      </div>
-      <div class="snippet">
-        <div class="or-label">B　メモを置く</div>
-        <p class="note">ファイル名はそのままでOK。日付フォルダに <code>記録.txt</code> を作り、<strong>撮った順に1行1セット</strong>で「重量 回数 RPE」。</p>
-        <div class="snippet-head"><span>記録.txt</span><button class="copy" type="button" data-target="snip-log">コピー</button></div>
-        <pre id="snip-log">100 5 8
-102.5 3 9.5
-105 2 9</pre>
-      </div>
-    </div>
+    <h2><span class="no">5</span>送り方<span class="when">LINE で</span></h2>
+    <p>その日のうちに、<strong>撮った順に1本ずつ</strong>送ってください。<strong>動画を1本送ったら、すぐ続けて1行</strong>で「重量 回数 RPE」を送ります。</p>
+    <ol class="chat" aria-label="送る順番の例">
+      <li><span class="clip"><span class="play" aria-hidden="true">▶</span>1本目</span><span class="msg">100kg 5回 RPE8</span></li>
+      <li><span class="clip"><span class="play" aria-hidden="true">▶</span>2本目</span><span class="msg">105kg 5回 RPE9</span></li>
+      <li><span class="clip"><span class="play" aria-hidden="true">▶</span>3本目</span><span class="msg">110kg 5回 RPE9.5</span></li>
+    </ol>
     <div class="snippet">
-      <div class="snippet-head"><span>フォルダの例</span></div>
-      <pre>スクワット研究/
-└─ 自分の名前/
-    ├─ プロフィール.txt
-    ├─ 20261005/
-    │   ├─ IMG_1234.MOV
-    │   ├─ IMG_1235.MOV
-    │   └─ 記録.txt
-    └─ 20261008/
-        ├─ 100kg_5rep_RPE8.mp4
-        └─ 105kg_3rep_RPE9.mp4</pre>
+      <div class="snippet-head"><span>動画の次に送る1行</span><button class="copy" type="button" data-target="snip-line">コピー</button></div>
+      <pre id="snip-line">100kg 5回 RPE8</pre>
     </div>
+    <ul class="plain">
+      <li>動画は<strong>切らずにそのまま</strong>（録画開始〜録画停止まで）</li>
+      <li><strong>1本ごとに必ず1行</strong>。順番を入れ替えない</li>
+      <li>撮った日より後に送るときは、先に「11/5 の分」のように撮った日を1行</li>
+      <li>重量や回数を書き間違えたら、何本目かを書いて直してください（RPE は後から変えない）</li>
+    </ul>
   </section>
 
   <footer>
