@@ -15,4 +15,4 @@ ultralytics            # YOLO26 Pose（重みは weights/yolo26m-pose.pt）
 mediapipe==0.10.14     # 比較用の pose_extract.py。新しい版は solutions API が無いので固定
 pytest                 # scripts/test_pipeline.py, scripts/test_bar_tracking.py
 psutil                 # multi_imu_receiver.py のブロードキャスト先の計算（無くても 255.255.255.255 で動く）
-# 外部ツール: ffmpeg（ffprobe）… ingest_remote.py が動画の撮影日時を読む。無ければファイル名順になる
+# 外部ツール: ffmpeg（ffprobe）… ingest_remote.py が動画の長さと撮影日時を読む（撮影日時は番号の無い名前のときだけ順番に使う）

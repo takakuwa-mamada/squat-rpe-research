@@ -15,6 +15,7 @@
 import sys
 import json
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import extract_features as ef          # noqa: E402
 from ingest_remote import parse_label, parse_log_line   # noqa: E402
+import ingest_remote as ir             # noqa: E402
 
 G = 9.80665
 COCO = ["nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_shoulder", "right_shoulder",
@@ -284,6 +286,8 @@ def test_imu_single_rep_has_no_velocity_loss():
     ("100kg_5rep_RPE8", {"weight_kg": 100, "reps": 5, "rpe": 8}),
     ("102.5kg 3回 RPE9.5", {"weight_kg": 102.5, "reps": 3, "rpe": 9.5}),
     ("100kgx5@8", {"weight_kg": 100, "reps": 5, "rpe": 8}),
+    ("01_100㎏ 5回 ＲＰＥ８", {"weight_kg": 100, "reps": 5, "rpe": 8}),             # スマホで打った1行を貼った名前
+    ("１０２．５ｋｇ　３回　ＲＰＥ９．５", {"weight_kg": 102.5, "reps": 3, "rpe": 9.5}),
     ("IMG_1234", {}),
 ])
 def test_parse_label(name, expected):
@@ -293,6 +297,78 @@ def test_parse_label(name, expected):
 def test_parse_log_line():
     assert parse_log_line("102.5 3 9.5") == {"weight_kg": 102.5, "reps": 3, "rpe": 9.5}
     assert parse_log_line("# メモ") is None
+
+
+def test_read_profile_pasted_from_line(tmp_path):
+    """LINE で送られた4行を貼ったプロフィール（全角の数字・空白が混ざっていても読める）"""
+    (tmp_path / "プロフィール.txt").write_text("身長　１７５\n体重 80\n１ＲＭ　１５０\n歴 5\n", encoding="utf-8")
+    assert ir.read_profile(tmp_path) == {"height_cm": 175, "body_mass_kg": 80, "squat_1rm_kg": 150,
+                                         "training_years": 5}
+
+
+# ---------------------------------------------------------------------------
+# 協力者の取り込み（LINE で受け取った動画は、動画の中の日時が送った時刻になる）
+# ---------------------------------------------------------------------------
+def _remote_folder(tmp_path, monkeypatch, folder_name, sent):
+    """data/_remote/協力者A/<folder_name>/ に空の動画を作る。sent = {ファイル名: 動画の中の日時 or None}"""
+    data = tmp_path / "data"
+    folder = data / "_remote" / "協力者A" / folder_name
+    folder.mkdir(parents=True)
+    for name in sent:
+        (folder / name).write_bytes(b"")
+    monkeypatch.setattr(ir, "DATA_ROOT", data)
+    monkeypatch.setattr(ir, "probe_video", lambda p: {
+        "created": datetime.fromisoformat(sent[p.name]) if sent[p.name] else None, "duration": 60.0})
+    return data, folder
+
+
+def test_ingest_line_videos_follow_number_prefix(tmp_path, monkeypatch):
+    """番号付きの名前は番号の順。動画の中の日時（送った時刻）は順番・撮影時刻・休憩時間に使わない"""
+    sent = {"02_105kg 5回 RPE8.5.mp4": "2026-11-06T10:00:05+00:00",    # 03 → 02 → 01 の順に送った
+            "01_100kg_5rep_RPE8.mp4": "2026-11-06T10:00:09+00:00",
+            "03_110kgx5@9.5.mp4": "2026-11-06T10:00:00+00:00"}
+    data, folder = _remote_folder(tmp_path, monkeypatch, "20261105", sent)
+    ses = ir.ingest_folder("S003", "協力者A", folder, dry_run=False, force=False)
+    meta = json.loads((data / "S003" / ses / "meta.json").read_text(encoding="utf-8"))
+    assert meta["date"] == "2026-11-05"
+    assert [s["source_video"] for s in meta["sets"]] == sorted(sent)
+    assert [(s["weight_kg"], s["reps_completed"], s["rpe"]) for s in meta["sets"]] == \
+        [(100, 5, 8), (105, 5, 8.5), (110, 5, 9.5)]
+    assert all(s["recorded_at"] is None and s["rest_before_sec"] is None for s in meta["sets"])
+
+
+def test_ingest_number_gap_only_warns(tmp_path, monkeypatch, capsys):
+    """番号が飛んでいても（02 の置き忘れなど）取り込む。ラベルは1本ずつ名前にあるので、注意を出すだけ"""
+    sent = {"01_100kg 5回 RPE8.mp4": None, "03_110kg 5回 RPE9.mp4": None}
+    data, folder = _remote_folder(tmp_path, monkeypatch, "20261105", sent)
+    ses = ir.ingest_folder("S003", "協力者A", folder, dry_run=False, force=False)
+    meta = json.loads((data / "S003" / ses / "meta.json").read_text(encoding="utf-8"))
+    assert [s["rpe"] for s in meta["sets"]] == [8, 9]
+    assert "[注意] 番号が 1 から順に続いていません（1, 3）" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("folder_name,sent", [
+    ("1回目", {"01_100kg 5回 RPE8.mp4": None, "02_105kg 5回 RPE9.mp4": None}),          # 日付が読めない
+    ("20261105", {"01_100kg 5回 RPE8.mp4": None, "105kg 5回 RPE9.mp4": None}),        # 番号の無い動画が混ざる
+    ("20261105", {"01_100kg 5回 RPE8.mp4": None, "01_105kg 5回 RPE9.mp4": None}),     # 番号が重なる
+    ("20261105", {"815051398.929315.mp4": "2026-10-30T11:09:59+00:00"}),                # LINE の名前のまま
+])
+def test_ingest_rejects_unclear_order(tmp_path, monkeypatch, folder_name, sent):
+    data, folder = _remote_folder(tmp_path, monkeypatch, folder_name, sent)
+    assert ir.ingest_folder("S003", "協力者A", folder, dry_run=False, force=False) is None
+    assert not (data / "S003").exists()
+
+
+def test_ingest_without_numbers_keeps_recording_time_order(tmp_path, monkeypatch):
+    """番号が無ければ今までどおり撮影日時の順（撮影日時の残った元の動画を受け取ったとき）"""
+    sent = {"IMG_0002.MOV": "2026-11-05T18:05:00+00:00", "IMG_0001.MOV": "2026-11-05T18:10:00+00:00"}
+    data, folder = _remote_folder(tmp_path, monkeypatch, "20261105", sent)
+    (folder / "記録.txt").write_text("100 5 8\n105 5 9\n", encoding="utf-8")
+    ses = ir.ingest_folder("S003", "協力者A", folder, dry_run=False, force=False)
+    meta = json.loads((data / "S003" / ses / "meta.json").read_text(encoding="utf-8"))
+    assert [s["source_video"] for s in meta["sets"]] == ["IMG_0002.MOV", "IMG_0001.MOV"]
+    assert [s["weight_kg"] for s in meta["sets"]] == [100, 105]
+    assert meta["sets"][1]["rest_before_sec"] == 240           # 5 分 − 1 本目の長さ 60 s
 
 
 # ---------------------------------------------------------------------------

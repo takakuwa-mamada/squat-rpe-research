@@ -3,19 +3,25 @@
 =============================================================================
  協力者（遠隔・動画のみ）のデータを取り込むスクリプト
 
- 【置き方】 Google Drive の共有フォルダを、そのまま data/_remote/ に置く
-   data/_remote/<名前>/プロフィール.txt           （初回だけ。無くても取り込める）
-   data/_remote/<名前>/<日付フォルダ>/*.mp4|*.mov   （1セット = 1本）
-   data/_remote/<名前>/<日付フォルダ>/記録.txt      （ファイル名にラベルが無いとき）
+ 【置き方】 LINE で受け取った動画を、撮った順の番号とラベルを付けた名前で保存する
+   data/_remote/<名前>/プロフィール.txt                     （初回だけ。無くても取り込める）
+   data/_remote/<名前>/<日付フォルダ>/01_100kg 5回 RPE8.mp4   （1セット = 1本。先頭の番号 = 撮った順）
+   data/_remote/<名前>/<日付フォルダ>/記録.txt              （ファイル名にラベルが無いとき）
 
-   日付フォルダ名は 20261005 / 2026-10-05 / 2026_10_05 など、日付が読めればよい。
+   日付フォルダ名は 20261105 / 2026-11-05 / 2026_11_05 など、日付が読めればよい。
+
+ 【順番】 ファイル名の先頭に番号（01_, 02_ …）があれば、その順に並べる。
+   LINE で受け取った動画は、中の日時（creation_time）もファイル名の数字も「送った時刻」で、撮った時刻ではない
+   → 番号付きの動画は中の日時を使わない（撮影時刻・休憩時間は空。日付はフォルダ名から読み、読めなければ取り込まない）。
+   番号が無ければ、動画の撮影日時（メタデータ）→ 無ければファイル名の順。
+   番号の重なり・番号の無い動画の混ざり・LINE の数字の名前のまま（815051398.929315.mp4 など）は取り込まない。
 
  【ラベル（重量・回数・RPE）】 次のどちらか
-   (1) ファイル名:  100kg_5rep_RPE8.mp4 / 102.5kg 3回 RPE9.5.mov / 100kgx5@8.mp4
-   (2) 記録.txt:    撮影した順に 1行1セット「重量 回数 RPE」
+   (1) ファイル名:  01_100kg 5回 RPE8.mp4 / 01_100kg_5rep_RPE8.mp4 / 100kgx5@8.mp4
+                   （協力者が LINE で動画の次に送ってくる 1 行「100kg 5回 RPE8」を番号の後ろに貼ればよい）
+   (2) 記録.txt:    撮った順に 1行1セット「重量 回数 RPE」
                        100 5 8
                        102.5 3 9.5
-   撮影順は動画の撮影日時（メタデータ）→ 無ければファイル名の順。
 
  【プロフィール.txt】 例（1行1項目、順不同）
      身長 175
@@ -32,11 +38,10 @@
    python scripts\\ingest_remote.py              # 未取り込みの日付フォルダをすべて取り込む
    python scripts\\ingest_remote.py --dry-run    # 何をするかだけ表示（コピーしない）
    python scripts\\ingest_remote.py --force      # 取り込み済みも作り直す（同じ SES 番号を使う）
-   python scripts\\ingest_remote.py --src "G:\\マイドライブ\\スクワット研究"
-                                                 # Google Drive for desktop の共有フォルダから直接
+   python scripts\\ingest_remote.py --src <フォルダ>   # data/_remote 以外に置いたとき
    → 続けて python scripts\\run_pipeline.py
 
- 依存: ffprobe（撮影日時の取得。無ければファイル名順になる）
+ 依存: ffprobe（長さと撮影日時の取得。無ければ番号かファイル名の順になる）
 =============================================================================
 """
 
@@ -46,6 +51,7 @@ import json
 import shutil
 import argparse
 import subprocess
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -66,6 +72,8 @@ RE_WEIGHT = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:kg|ｋｇ|キロ)", re.I)
 RE_REPS = re.compile(r"(?:(\d+)\s*(?:reps?|回|レップ))|(?:[x×]\s*(\d+))", re.I)
 RE_RPE = re.compile(r"(?:rpe\s*(\d+(?:[.,]\d+)?))|(?:@\s*(\d+(?:[.,]\d+)?))", re.I)
 RE_DATE = re.compile(r"(20\d{2})[-_./]?(\d{2})[-_./]?(\d{2})")
+RE_ORDER = re.compile(r"^(\d{1,3})[_\-\s]")          # 先頭の撮った順の番号（01_100kg 5回 RPE8）
+RE_LINE_NAME = re.compile(r"^\d{9,}(?:\.\d+)?$")     # LINE で受け取ったままの名前（送った時刻の数字）
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +84,9 @@ def _num(s: str) -> float:
 
 
 def parse_label(text: str) -> dict:
-    """文字列から 重量・回数・RPE を読む（見つかったものだけ返す）"""
+    """文字列から 重量・回数・RPE を読む（見つかったものだけ返す）。
+    スマホで打った全角の数字・ＲＰＥ・㎏ などは半角にそろえてから読む"""
+    text = unicodedata.normalize("NFKC", text)
     out = {}
     m = RE_WEIGHT.search(text)
     if m:
@@ -92,6 +102,7 @@ def parse_label(text: str) -> dict:
 
 def parse_log_line(line: str) -> Optional[dict]:
     """記録.txt の1行。単位付きでも、数字3つ（重量 回数 RPE）でもよい"""
+    line = unicodedata.normalize("NFKC", line)
     lab = parse_label(line)
     if len(lab) == 3:
         return lab
@@ -136,7 +147,7 @@ def read_profile(person_dir: Path) -> dict:
             continue
         prof = {}
         for line in read_text_any(p).splitlines():
-            line = line.strip()
+            line = unicodedata.normalize("NFKC", line).strip()     # LINE の文面を貼ったときの全角の数字など
             if not line:
                 continue
             low = line.lower()
@@ -258,13 +269,32 @@ def ingest_folder(sid: str, person: str, folder: Path, dry_run: bool, force: boo
     if not videos:
         return None
     info = {v: probe_video(v) for v in videos}
+    errors = []
+
+    # 順番: 先頭の番号 → 撮影日時 → ファイル名
+    line_names = [v.name for v in videos if RE_LINE_NAME.match(v.stem)]
+    if line_names:
+        errors.append("LINE で受け取ったままの名前です（数字は送った時刻で、撮った順ではない）。"
+                      "01_100kg 5回 RPE8 のように撮った順の番号を付けてください: " + ", ".join(line_names))
+    order = {v: int(m.group(1)) for v in videos if (m := RE_ORDER.match(v.stem))}
+    numbered = len(order) == len(videos)
+    if order and not numbered:
+        errors.append("撮った順の番号が付いていない動画があります: "
+                      + ", ".join(v.name for v in videos if v not in order))
+    if numbered:
+        # 番号付き（LINE で受け取った動画）: 中の日時は送った時刻なので、順番・撮影時刻・休憩時間・日付に使わない
+        for v in videos:
+            info[v]["created"] = None
+        videos.sort(key=lambda v: (order[v], v.name))
+        if len(set(order.values())) != len(videos):
+            errors.append("撮った順の番号が重なっています: " + ", ".join(v.name for v in videos))
     have_time = all(info[v]["created"] for v in videos)
-    videos.sort(key=(lambda v: (info[v]["created"], v.name)) if have_time else (lambda v: v.name))
+    if not numbered:
+        videos.sort(key=(lambda v: (info[v]["created"], v.name)) if have_time else (lambda v: v.name))
 
     # ラベル: ファイル名 → 足りなければ 記録.txt
     labels = [parse_label(v.stem) for v in videos]
     log_rows, log_name = read_log(folder)
-    errors = []
     for i, v in enumerate(videos):
         if len(labels[i]) == 3:
             continue
@@ -278,13 +308,8 @@ def ingest_folder(sid: str, person: str, folder: Path, dry_run: bool, force: boo
     for i, v in enumerate(videos):
         if len(labels[i]) == 3 and (msg := check_label(labels[i])):
             errors.append(f"{v.name}: {msg}")
-    if errors:
-        print(f"  [要確認] {source_key}（取り込みませんでした）")
-        for e in errors:
-            print(f"      - {e}")
-        return None
 
-    # 日付
+    # 日付: フォルダ名 → 撮影日時（番号付きの動画は撮影日時を使わないので、フォルダ名から読めなければ取り込まない）
     m = RE_DATE.search(folder.name)
     if m:
         date_str = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
@@ -292,11 +317,24 @@ def ingest_folder(sid: str, person: str, folder: Path, dry_run: bool, force: boo
         date_str = info[videos[0]]["created"].date().isoformat()
     else:
         date_str = ""
+        if numbered:
+            errors.append(f"フォルダ名から日付が読めません（例: 20261105）: {folder.name}")
+
+    if errors:
+        print(f"  [要確認] {source_key}（取り込みませんでした）")
+        for e in errors:
+            print(f"      - {e}")
+        return None
 
     ses = done.name if done else next_session_id(sid)
     out_dir = DATA_ROOT / sid / ses
-    order_note = "撮影日時の順" if have_time else "ファイル名の順（撮影日時が読めませんでした）"
+    order_note = ("ファイル名の番号の順（動画の中の日時は送った時刻なので使わない）" if numbered
+                  else "撮影日時の順" if have_time else "ファイル名の順（撮影日時が読めませんでした）")
     print(f"  == {source_key} → {sid}/{ses}  ({len(videos)}セット, {date_str}, {order_note})")
+    if numbered and sorted(order.values()) != list(range(1, len(videos) + 1)):
+        # ラベルは1本ずつファイル名にあるので取り違えにはならない。抜けたセットがないかだけ知らせる
+        print(f"     [注意] 番号が 1 から順に続いていません（{', '.join(str(n) for n in sorted(order.values()))}）。"
+              "置き忘れた動画がないか確かめてください")
 
     sets = []
     for i, v in enumerate(videos, start=1):
@@ -365,7 +403,7 @@ def main():
         sys.exit(f"[ERROR] フォルダがありません: {remote_root}")
     if not remote_root.is_dir():
         remote_root.mkdir(parents=True, exist_ok=True)
-        print(f"[INFO] {remote_root} を作りました。協力者の共有フォルダをここに置いてください。")
+        print(f"[INFO] {remote_root} を作りました。協力者の動画を <名前>\\<日付>\\01_100kg 5回 RPE8.mp4 の名前で置いてください。")
 
     subs = load_subjects()
     n_new = 0
