@@ -194,13 +194,14 @@ def resolve_plate_roi(cap: cv2.VideoCapture, video_path: Path,
                       first_frame: np.ndarray, fps: float, n_frames: int,
                       stem: str, roi_json: Path,
                       roi_arg: Optional[str], reselect: bool,
-                      force_gui: bool
+                      force_gui: bool, allow_gui: bool = True
                       ) -> Optional[Tuple[Tuple[int, int, int, int], int,
                                           np.ndarray, str, cv2.VideoCapture]]:
     """プレートROIと追跡開始フレームを決める。
 
     優先順位: --roi 引数 > 保存済みJSON > 自動検出 > GUIフォールバック。
     自動検出はcapを読み進めるため、GUIフォールバック時はcapを開き直す。
+    allow_gui=False なら、自動検出に失敗したとき GUI を開かずに None（テスト・一括処理用）。
 
     Returns:
         (roi, start_frame, start_frameの画像, 決定方法, cap)。中断時 None。
@@ -231,6 +232,9 @@ def resolve_plate_roi(cap: cv2.VideoCapture, video_path: Path,
         if found is not None:
             roi, start, frame = found
             return roi, start, frame, "auto", cap
+        if not allow_gui:
+            print("  [WARN] auto-detection failed")
+            return None
         print("  [WARN] auto-detection failed; falling back to GUI")
         cap.release()
         cap = cv2.VideoCapture(str(video_path))
@@ -255,7 +259,10 @@ def save_roi_preview(frame: np.ndarray, roi: Tuple[int, int, int, int],
     cv2.rectangle(img, (x, y), (x + w, y + h), (0, 215, 255), 1)
     cv2.putText(img, f"plate ROI ({method})", (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-    cv2.imwrite(str(out_png), img)
+    # cv2.imwrite は日本語を含むパス（G:\マイドライブ\…）に書けず、False を返すだけなので、PNG に変換してから書く
+    ok, buf = cv2.imencode(".png", img)
+    if ok:
+        out_png.write_bytes(buf.tobytes())
 
 
 # ===========================================================================
@@ -588,7 +595,8 @@ def process_one_video(video_path: Path, out_dir: Path,
                       save_annotated: bool = True,
                       save_plot: bool = True,
                       reselect_roi: bool = False,
-                      force_gui: bool = False) -> dict:
+                      force_gui: bool = False,
+                      allow_gui: bool = True) -> dict:
     """1本の動画に対して追跡・解析・出力を行う。
 
     Returns:
@@ -619,7 +627,7 @@ def process_one_video(video_path: Path, out_dir: Path,
 
     resolved = resolve_plate_roi(cap, video_path, first_frame, fps, n_frm,
                                  stem, out_roi, roi_arg, reselect_roi,
-                                 force_gui)
+                                 force_gui, allow_gui)
     if resolved is None:
         cap.release()
         return {"status": "skipped",

@@ -248,11 +248,12 @@ def _colors(reps):
     return {s: f"C{i}" for i, s in enumerate(subs)}
 
 
-def fig_bland_altman(reps, summ, out):
+def fig_bland_altman(reps, summ, out, title=None, note=FIG_NOTE, vid_name="動画"):
+    """title・note・vid_name は compare_side_imu.py（横から撮った動画のプレート）が差し替える"""
     col = _colors(reps)
     fig, axes = plt.subplots(2, 3, figsize=(15, 8.5))
     axes.flat[-1].axis("off")
-    axes.flat[-1].text(0.02, 0.98, FIG_NOTE, va="top", ha="left", fontsize=10, transform=axes.flat[-1].transAxes)
+    axes.flat[-1].text(0.02, 0.98, note, va="top", ha="left", fontsize=10, transform=axes.flat[-1].transAxes)
     for ax, (k, name, unit, _) in zip(axes.flat, METRICS):
         s = summ[summ["metric"] == k].iloc[0]
         for sid, g in reps.groupby("subject_id"):
@@ -266,11 +267,11 @@ def fig_bland_altman(reps, summ, out):
                       f"（n={int(s['n'])}）")
         ax.set_title(title, fontsize=9)
         ax.axhline(0, color="gray", lw=0.6)
-        ax.set_xlabel(f"その値の大きさ（IMU と動画の平均）[{unit}]")
-        ax.set_ylabel(f"動画 − IMU [{unit}]")
+        ax.set_xlabel(f"その値の大きさ（IMU と{vid_name}の平均）[{unit}]")
+        ax.set_ylabel(f"{vid_name} − IMU [{unit}]")
         ax.grid(alpha=0.3)
     axes.flat[0].legend(fontsize=8)
-    fig.suptitle("動画（肩）と IMU（バー）のレップごとの一致（Bland–Altman 図、参考値）")
+    fig.suptitle(title or "動画（肩）と IMU（バー）のレップごとの一致（Bland–Altman 図、参考値）")
     plt.tight_layout()
     fig.savefig(out, dpi=130)
     plt.close(fig)

@@ -753,3 +753,105 @@ def test_compare_video_imu_agrees_on_true_scale():
     assert rows["bottom_gap_s"].abs().median() < 0.07 and rows["bottom_gap_s"].abs().max() < 0.25
     big = pd.DataFrame(cv.compare_set(feat, kp, 720, 1280, 30.0, imu, height_cm * 1.1, expected_reps=5))
     assert abs(big["vid_mcv"].mean() / rows["vid_mcv"].mean() - 1.1) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# 横から撮った動画（プレートの中心）と IMU（2026-11-03）
+# ---------------------------------------------------------------------------
+def side_truth(n_reps=5):
+    """横から撮るセットの合成: 時刻 t [s]（受信時刻 − 1000 s = 動画の時刻）と、プレートの中心（バー）の
+    上下の位置 [m]（上が正）。ラックアウト・ラックインの小さな上下動（4 cm）つき"""
+    t, y, asc = squat_trajectory(1000.0, n_reps=n_reps, lead=6.0, tail=4.0)
+    bump = lambda t0: 0.04 * np.exp(-((t - t0) / 0.3) ** 2)
+    return t, -y + bump(2.0) + bump(t[-1] - 1.5), asc
+
+
+def side_receiver_folder(folder, t, pos, reps=5):
+    """受信フォルダ（raw_BAR.csv・markers.csv）。SPACE は動画の 0.5 秒目と、終わりの 0.5 秒前"""
+    ti = np.arange(0.0, t[-1], 0.01)
+    a = np.gradient(np.gradient(np.interp(ti, t, pos), 0.01), 0.01)
+    rng = np.random.default_rng(2)
+    n = len(ti)
+    pd.DataFrame({"recv_time_s": 1000.0 + ti, "boot_ms": 123456 + np.arange(n) * 10,
+                  "ax_g": rng.normal(0, 0.01, n), "ay_g": rng.normal(0, 0.01, n),
+                  "az_g": 1.05 + a / G + rng.normal(0, 0.01, n),
+                  "gx_dps": -3.8 + rng.normal(0, 1, n), "gy_dps": -12.9 + rng.normal(0, 1, n),
+                  "gz_dps": 16.0 + rng.normal(0, 1, n)}).to_csv(folder / "raw_BAR.csv", index=False)
+    start, end = 1000.5, 1000.0 + t[-1] - 0.5
+    pd.DataFrame([{"set_no": 1, "start_s": start, "end_s": end, "duration_s": end - start,
+                   "rpe": None, "weight_kg": 60, "reps": reps}]).to_csv(folder / "markers.csv", index=False)
+
+
+def write_plate_video(path, t, pos, fps=30.0, r_px=40.0, w=360, h=640):
+    """横から撮った合成の動画: プレート（直径 2 r_px = 450 mm。内側に輪と穴）が pos のとおりに上下する"""
+    import cv2
+    px_per_m = 2 * r_px / 0.45
+    bg = np.random.default_rng(3).integers(165, 205, (h, w, 3), dtype=np.uint8)
+    out = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    sub = lambda v: int(round(v * 16))                       # 1/16 px 単位（shift=4）
+    for k in range(int(t[-1] * fps)):
+        img = bg.copy()
+        c = (sub(w / 2), sub(0.35 * h - np.interp(k / fps, t, pos) * px_per_m))
+        cv2.circle(img, c, sub(r_px), (40, 40, 40), -1, cv2.LINE_AA, 4)
+        cv2.circle(img, c, sub(0.55 * r_px), (110, 110, 110), 3, cv2.LINE_AA, 4)
+        cv2.circle(img, c, sub(0.15 * r_px), (225, 225, 225), -1, cv2.LINE_AA, 4)
+        out.write(img)
+    out.release()
+
+
+def test_compare_side_imu_plate_matches_imu(tmp_path):
+    """横の動画のプレートの中心と IMU が同じ動きなら、波形で時刻が合い（動画は SPACE の 0.5 秒前から）、
+    MCV・上昇時間も一致する。プレートの直径を 10 % 大きく入れると、横の MCV も 10 % 大きく出る（物差しがそのまま効く）。
+    日本語を含むフォルダでも、プレートの確認画像が書ける（cv2.imwrite は書けない）"""
+    import compare_side_imu as cs
+    folder = tmp_path / "横から" / "session_20261105_180000_60kg_5rep"
+    folder.mkdir(parents=True)
+    t, pos, _ = side_truth()
+    side_receiver_folder(folder, t, pos)
+    write_plate_video(folder / "side01.mp4", t, pos)
+    rows, info = cs.compare_session(folder, plate_mm=450.0, allow_gui=False)
+    assert len(rows) == 5 and info[0]["n_reps_detected"] == 5
+    assert abs(info[0]["sync_offset_s"] + 0.5) < 0.05
+    assert info[0]["sync_r"] >= ef.SYNC_R_MIN and info[0]["sync_margin"] >= ef.SYNC_MARGIN_MIN
+    reps = pd.DataFrame(rows)
+    assert abs(reps["vid_mcv"].mean() / reps["imu_mcv"].mean() - 1) < 0.05
+    assert abs(reps["diff_ascent_s"].mean()) < 0.05
+    assert (folder / "plate" / "side01_bar_roi_preview.png").exists()
+    big, _ = cs.compare_session(folder, plate_mm=495.0, allow_gui=False)   # 追跡は保存したものを使い、物差しだけ変わる
+    assert abs(pd.DataFrame(big)["vid_mcv"].mean() / reps["vid_mcv"].mean() - 1.1) < 0.01
+
+
+def test_compare_side_imu_skips_reps_where_plate_was_hidden(tmp_path):
+    """プレートを 0.2 s より長く見失った（ラックなどに隠れた）レップは比べない。0.1 s ならつないで比べる"""
+    import compare_side_imu as cs
+    t, pos, asc = side_truth()
+    fps, mm_per_px = 30.0, 5.0
+    tv = np.arange(int(t[-1] * fps)) / fps
+    y_px = 300.0 - np.interp(tv, t, pos) * 1000.0 / mm_per_px
+    starts = 6.0 + np.concatenate([[0.0], np.cumsum([2.0 + a for a in asc])])   # 各レップの下降の始まり
+    bottom = lambda i: starts[i] + 1.3                                          # 底（0.2 s 止まる中ほど）
+    tracked = ~(((tv >= bottom(2) - 0.15) & (tv < bottom(2) + 0.15))          # 3 回目: 0.3 s
+                | ((tv >= bottom(3) - 0.05) & (tv < bottom(3) + 0.05)))       # 4 回目: 0.1 s
+    path = pd.DataFrame({"frame": np.arange(len(tv)), "y_px": np.where(tracked, y_px, np.nan),
+                         "tracked": tracked})
+    summary = {"fps": fps, "mm_per_px": mm_per_px, "plate_diameter_mm": 450.0,
+               "scale_source": "hough_radius", "tracked_ratio": float(tracked.mean())}
+    side_receiver_folder(tmp_path, t, pos)
+    m = pd.read_csv(tmp_path / "markers.csv").iloc[0]
+    imu = cs.cut_imu(pd.read_csv(tmp_path / "raw_BAR.csv"), m["start_s"], m["end_s"])
+    rows, info = cs.compare_set(path, summary, imu, 450.0, expected_reps=5)
+    assert info["n_reps_detected"] == 5 and info["n_lost_skipped"] == 1
+    assert [r["rep"] for r in rows] == [1, 2, 4, 5]
+    assert abs(rows[2]["lost_s"] - 0.1) < 0.04
+    reps = pd.DataFrame(rows)
+    assert abs(reps["vid_mcv"].mean() / reps["imu_mcv"].mean() - 1) < 0.05
+
+
+def test_side_judgement_against_front_ratio():
+    """セットごとの倍率の 95 % 信頼区間が 1.00 だけを含めば IMU は正しい、前の動画の 1.09 だけなら IMU が小さい、
+    両方なら決められない"""
+    import compare_side_imu as cs
+    assert cs.judge([1.00, 1.02, 0.99, 1.01, 0.98, 1.00], 1.09)["verdict"].startswith("IMU はほぼ正しい")
+    assert cs.judge([1.08, 1.10, 1.09, 1.07, 1.11, 1.09], 1.09)["verdict"].startswith("IMU が小さく")
+    assert cs.judge([1.00, 1.09], 1.09)["verdict"].startswith("まだ決められない")
+    assert cs.judge([1.05], 1.09)["verdict"].startswith("セットが足りない")

@@ -256,6 +256,8 @@ def detect_plate_circle(frame: np.ndarray,
     Hough円検出の候補それぞれについて「円周上にCannyエッジが存在する
     割合（エッジ支持率）」を評価し、最もプレートらしい円を選ぶ。
     フレーム端で切れている円（プレート全体が映っていない）は除外する。
+    選んだ円と同じ中心で外へ向かって探し直し、縁のそろった円のうち
+    いちばん外側を外周とする（_outermost_concentric_radius）。
 
     Args:
         frame: BGR画像
@@ -288,7 +290,7 @@ def detect_plate_circle(frame: np.ndarray,
     margin = s * border_margin_frac
     theta = np.linspace(0.0, 2.0 * np.pi, 72, endpoint=False)
 
-    best_score = -1.0
+    best_score, best_support = -1.0, 0.0
     best: Optional[Tuple[float, float, float]] = None
     for cx, cy, r in circles[0][:max_candidates]:
         # プレート全体が映っていない（端で切れる）円は除外
@@ -301,8 +303,40 @@ def detect_plate_circle(frame: np.ndarray,
         # 支持率が同程度なら大きい円（プレート）を優先
         score = support + 0.05 * (r / max_r)
         if support >= edge_support_thresh and score > best_score:
-            best_score = score
+            best_score, best_support = score, support
             best = (float(cx), float(cy), float(r))
+    if best is None:
+        return None
+    cx, cy, r = best
+    r = _outermost_concentric_radius(edges, cx, cy, r, max_r,
+                                     max(edge_support_thresh, 0.6 * best_support),
+                                     margin, theta)
+    return cx, cy, r
+
+
+def _outermost_concentric_radius(edges: np.ndarray, cx: float, cy: float,
+                                 r: float, max_r: float, thresh: float,
+                                 margin: float, theta: np.ndarray) -> float:
+    """同じ中心の円のうち、縁（エッジ）がそろっている、いちばん外側の円の半径。
+
+    HoughCircles は中心が同じ円を 1 つしか返さず、プレートの内側の輪
+    （縁が 2 重になり票が多い）を選ぶことがある（合成の動画で、外周の
+    半径 40 px に対して 18 px を選び、物差しが 1.8 倍になった。2026-11-03）。
+    プレートの外周は「同じ中心でいちばん外側の、縁のそろった円」なので、
+    外へ向かって探し直す。返す半径は 1 px 程度の粗さ（膨らませたエッジで
+    数えるため）で、追跡の HoughRefiner が縁に合わせて精緻化する。
+    フレーム端にかかる半径より外は探さない。
+    """
+    h, w = edges.shape[:2]
+    best = r
+    for rr in np.arange(r, max_r + 0.5, 0.5):
+        if (cx - rr < margin or cy - rr < margin
+                or cx + rr > w - margin or cy + rr > h - margin):
+            break
+        xs = np.clip((cx + rr * np.cos(theta)).astype(int), 0, w - 1)
+        ys = np.clip((cy + rr * np.sin(theta)).astype(int), 0, h - 1)
+        if float(np.mean(edges[ys, xs] > 0)) >= thresh:
+            best = float(rr)
     return best
 
 
