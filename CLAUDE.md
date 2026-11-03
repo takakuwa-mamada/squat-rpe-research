@@ -3,7 +3,9 @@
 Claude Code が毎回読む運用メモ。研究の背景・経緯・判断理由・関連研究・計測メニューの詳細は
 `docs/研究コンテキスト.md` にある。設計判断、論文・発表資料、実験計画に関わる作業の前には必ず読むこと。
 
-最終更新: 2026-11-02（協力者の動画を LINE で受け取る形にした: 撮影ガイド・スマホ用ページ・ingest_remote.py（先頭の番号の順。§5・§7 の 7・§9）。
+最終更新: 2026-11-03（横から撮るセットを IMU と比べる compare_side_imu.py を用意し、プレートの自動検出が内側の輪を拾う問題を直した（§5・§7 の 10・§8 の 7）。
+評価 train_rpe_model.py を実データで通した（§3）。ゼミの進捗スライド（Artifact）を 11/3 の状態に直した（§1））
+（2026-11-02: 協力者の動画を LINE で受け取る形にした: 撮影ガイド・スマホ用ページ・ingest_remote.py（先頭の番号の順。§5・§7 の 7・§9）。
 IMU が正しいかの確認用に、横からだけ撮るセットを入れる（§8 の 7））
 （2026-11-01: 協力者からの受け取りは LINE、1RM は測り直さない、中間審査はオンライン（ユーザー決定。§1・§2・§3・§7 の 7・§8））
 （前回: 2026-10-31 動画の速度と RPE の相関・LINE 程度の圧縮の試験・×1.09 の原因の切り分け、週報の書き方、M5 の実際の付け方、深さの差の確認、
@@ -42,6 +44,9 @@ IMU が正しいかの確認用に、横からだけ撮るセットを入れる�
   週報は `/weekly-issue` で一から書く（雛形 `docs/claude_commands/weekly_issue_template.md`。ユーザーはテンプレートを貼らなくてよい）。
 - 役割分担: コード・データ処理・解析は Claude Code。Word/PowerPoint/Excel の資料作成（研究計画書・ポスター・スライド・計測メニュー）は
   これまで Cowork 側で作ってきた（`*_source.js` は docx-js / pptxgenjs の生成スクリプト）。
+  **ゼミの進捗スライドは Claude Code が Artifact（スライドの形式、非公開）で作った**: https://claude.ai/artifact/AQL4tKJ4niT8TkWut8WtSk
+  （2026-10-31 作成・21 枚。11/3 に LINE・1RM を測り直さない・横から撮るセット・オンライン発表を反映。`presentations/slides/` にあるのは 8 月の旧版）。
+  直すときは Artifact の read（url 指定）で今の版を読んでから、変えたスライドだけを公開し直す。
 
 ## 2. 研究の要約（2026-09-27 更新）
 
@@ -172,7 +177,10 @@ IMU が正しいかの確認用に、横からだけ撮るセットを入れる�
   - **本人の動画はスマホから PC へ LINE で送っている**（2026-10-31 ユーザー確認）→ 今の動画（720×1280・約 2 Mbps、撮影日時が書き出した時刻）は LINE で一度圧縮されたもので、
     これまでの結果（動画と IMU の MCV の r 0.98 など）はすでに LINE の画質で出ている。この試験はそれを ffmpeg でさらに圧縮したもの。フレームレートは変えていない。
 - ファーム v4（PC 自動検出）はローカルで編集済み。M5 に書き込んだかは 2026-10-30 時点で未確認（留学先での計測は 10/15 から続いている）。
-- テスト: `pytest scripts\test_pipeline.py -q`（44 件、約 2〜4 分）。
+- テスト: `pytest scripts\test_pipeline.py -q`（47 件、約 2〜4 分）。
+- **評価を実データで通した（2026-11-03）**: `train_rpe_model.py` は今のデータ（S001 4 日 14 セット・S002 1 日 3 セット）で落ちずに最後まで動く。
+  動いたのは A（本人の中。RPE 6 以上の 9 セットで評価）と D だけ。B（汎用）は被験者 3 人以上、A は 1 人 3 セッション以上が要るので、B と S002 の A はスキップ。
+  9 セットの数字は比べる段階ではない（`models/20261103_143104/`）。B・C を動かすには協力者のデータが要る。
 - **学習に使えないセットは外す（2026-10-30）**: 基準は `scripts/quality_checks.py`（品質レポートと共通）。IMU が使えないセットは IMU を使う条件から、
   動画が使えないセットは動画を使う条件から外す（context には残る）。外すもの: データなし・レップ数 ≠ 申告・速度低下 −10 % 未満（レップの取り違え）・
   IMU の受信 80 Hz 未満・足元切れ・人物の検出漏れ 20 % 超・正面でない。信頼度の低さ・M5 の向き・時刻合わせが不確か・IMU の静止区間なし（2026-10-31）・
@@ -202,6 +210,7 @@ G:\マイドライブ\大学院\M1\Projects\Research\   （OneDrive「大学院�
 │   ├─ _sessions/session_YYYYMMDD_HHMMSS/   本人の受信スクリプトの生出力＋その日の動画（直下に置く）
 │   ├─ _remote/<名前>/<撮った日>/            協力者の受け取り置き場（LINE の動画を 01_100kg 5回 RPE8.mp4 の名前で保存）
 │   ├─ _side/session_…/                      横からだけ撮ったセット（IMU の確認用。受信を --outdir data\_side で起動。パイプラインは見ない。§8 の 7）
+│   │                                         横の動画は直下に置く。compare_side_imu.py がプレートを追って plate/ に保存
 │   ├─ _archive/                             取り込み直しなどで外したセッションの置き場（data/ の中なので git に入らない。
 │   │                                         _ で始まるフォルダはパイプラインが見ない）。ルートの _archive/ は git に入るのでデータを置かない
 │   └─ S001/SES001/ …, S002/SES001/ …       解析用（meta.json, imu/, videos/, pose/, features/）。SES 番号は split_session が自動で振る
@@ -221,6 +230,8 @@ python scripts\run_pipeline.py                     # 取り込み（SES 番号�
 python scripts\ingest_remote.py --dry-run          # 並び順とラベルの確認（コピーしない）
 python scripts\ingest_remote.py
 python scripts\run_pipeline.py
+# 横から撮るセット（IMU の確認。§8 の 7）: 受信は --outdir data\_side、動画は data\_side\session_…\ の直下に置いてから
+python scripts\compare_side_imu.py                 # outputs\rep_compare_side_imu*.csv と「判定」
 # 評価
 python scripts\train_rpe_model.py                  # models\<日時>\report.md
 ```
@@ -235,12 +246,13 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 | `pose_extract_yolo.py` | YOLO26 Pose で 17 点。**挙上者を追跡**（初回は最大の人、以降は前フレームに最も近い人）。`_yolo_info.json` に動画の縦横サイズ。`data/_` で始まるフォルダ（_remote・_sessions・_archive）は対象外（取り込み後の videos/ だけ処理。明示すれば `--subject _sessions` も可） |
 | `extract_features.py` | 1セット → JSON。IMU（レップ単位の MCV/MPV/ピーク/VL/上昇時間）＋骨格（正面用 22 次元）＋ %1RM。動画だけの試技も可。`_imu_reps`/`_pose_reps` にレップ詳細。**骨格はセットの区間だけで計算**（`_set_region`: 底の 4 s 前〜5 s 後。BL・立位・足元は底の 1.5 s 前〜2 s 後）。**動画と IMU の時刻合わせ**（`sync_video_imu`: 肩の速度と IMU の速度の相互相関。`sync_offset_s`・`sync_r`・`sync_margin`）→ 合えば IMU のレップは動画のレップ区間で取る（`imu_rep_source` = video / imu）。**IMU の時刻は M5 の時計**（`imu_on_device_clock`、§7 の 2）。**骨格の追跡が別の人に移ったコマは 8 点とも欠損に**（`_other_person_frames`、`pose_other_person_frames`、§7 の 4） |
 | `compare_video_imu.py` | RQ2: 時刻合わせが合ったセットで動画と IMU をレップ単位で比べる（上昇時間・MCV・ピーク・上昇の変位・深さ・速度低下。同じ定義を両方の波形に当てる）→ `outputs/rep_compare_video_imu*.csv`、Bland–Altman と散布図。`--subject` |
+| `compare_side_imu.py` | ×1.09 の切り分け（§8 の 7）: 横から撮った動画のプレートの中心（物差しは直径 45 cm、`--plate-diameter`）と IMU をレップ単位で比べる（2026-11-03）。`data/_side/session_…/` の markers.csv で IMU を切り、直下の動画（ファイル名の順 = セットの順）でプレートを追い（`plate/` に保存、`--force`・`--reselect-roi`）、速度の波形で時刻を合わせ（r ≥ 0.6・margin ≥ 0.05）、プレートの沈み込みでレップを区切り、`compare_video_imu` と同じ定義で比べる。プレートを 0.2 s より長く見失ったレップは比べない。→ `outputs/rep_compare_side_imu*.csv`・`fig_bland_altman_side_imu.png`。セットごとの MCV の倍率の平均と 95 % 信頼区間（t 分布）が 1.00 と前の動画の倍率のどちらを含むかを表示。合成の動画（プレートの半径 40 px）では倍率 0.988・時刻のずれ 0.507 s（正解 0.5） |
 | `plot_sync.py` | 時刻合わせの確認図（1 セット 1 枚）→ `outputs/sync_plots/`。上: ずれごとの相関（選んだずれと 2 番目）、中: 速度（動画を IMU の時刻に移して重ねる）、下: 位置。`--subject` |
 | `aggregate_features.py` | 全 JSON → `outputs/features_all.csv`（`_` で始まるキーは入れない。`data/_` で始まるフォルダは集計しない） |
 | `train_rpe_model.py` | 評価 A/B/C/D × 条件（context / imu_velocity / imu_all / video_velocity / video_all / imu+video、`--with-context`）× **学習の範囲（全 RPE ／ RPE 5 以上、`--train-min-rpe`）× 評価の範囲（全セット ／ RPE 6 以上 = 主結果、`--eval-min-rpe`）**。RPE 5 未満が無いと学習は全 RPE だけ。特徴量は明示リスト。**学習に使えないセットはデータ（IMU / 動画）ごとに外す**（`quality_checks.py`、report.md に一覧）。report.md（後半に範囲の比較表）、図、best.pkl |
 | `predict_rpe.py` | 学習済みモデルで予測（`--latest` は best.pkl 優先） |
 | `test_pipeline.py` | 合成データのテスト（複数レップの骨格・IMU、ラベル解析、評価の通し） |
-| `bar_path_extract.py` + `bar_tracking.py` | プレート追跡（**側面撮影が前提なので現方針では使わない**） |
+| `bar_path_extract.py` + `bar_tracking.py` | プレート追跡（側面撮影が前提。**正面の解析では使わない。横から撮るセットの比較（compare_side_imu.py）だけで使う**）。自動検出は、Hough で選んだ円と同じ中心でいちばん外側の、縁のそろった円を外周とする（2026-11-03 修正。Hough は同じ中心の円を 1 つしか返さず、内側の輪を選んで物差しが 1.8 倍になっていた。合成の動画で発見）。確認画像 `<動画名>_bar_roi_preview.png` は日本語のパスにも書けるようにした（§7 の 10）。`allow_gui=False` で自動検出に失敗しても GUI を開かない。単体で引数なしに実行すると data/ の全部の動画（正面も）を処理するので、使うときは compare_side_imu.py から |
 | `pose_extract.py`, `compare_pose_models.py`, `squat_udp_receiver.py`, `visualize_csv.py` | 旧版・比較用 |
 
 ## 6. データ形式
@@ -340,6 +352,8 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
 10. 2026-10-25 から Google ドライブ（パソコン版 Google ドライブの G:）上にある。`data/` もクラウドに同期されるのでバックアップになる。
     ただし同期フォルダなので、①同期中のファイルがロックされることがある、②`.git` は同期の衝突で壊れることがある（2台の PC で同時に触らない。
     おかしくなったら GitHub から clone し直す）、③パスに日本語が入る（OpenCV の imread/imwrite は日本語パスに弱い。動画の読み書きで失敗したら疑う）。
+    2026-11-03 確認: `cv2.imwrite` は G:\マイドライブ\… に False を返すだけで書けない（エラーも出ない）。`cv2.VideoCapture`・`cv2.VideoWriter` は読み書きできる。
+    画像は `cv2.imencode(".png", img)` → `Path.write_bytes` で書く（bar_path_extract.save_roi_preview）。
     Cowork の bash からは G: が見えないので、Cowork ではファイル操作だけ・git はユーザーか Claude Code が行う。
 11. `docs/研究計画書.pdf` はパスワード保護。本文は `docs/研究計画書_source.js`。
 12. `docs/計測チェックリスト.docx/.pdf` は 2026-09-27 に正面撮影版へ作り直した（生成: `node docs\計測チェックリスト_source.js`、docx は npm で別途）。旧版は `_archive/計測チェックリスト_旧_側面撮影.*`。
@@ -381,7 +395,9 @@ python scripts\train_rpe_model.py                  # models\<日時>\report.md
    RPE は入れない。受信は `--outdir data\_side` で本番と別に起動する（split_session は data/_sessions しか取り込まないので RPE のデータに混ざらない）。
    セーフティバーやラックの柱でプレートが隠れないか、最初の 1 本で確かめる。
    比べ方: 横から見たプレートの中心の上下（= バーの本当の動き。`bar_path_extract.py`、直径 45 cm で cm に換算）と IMU をレップごとに比べる。
-   時刻合わせは正面と同じく速度の波形で行う（比べるスクリプトは未作成。データが来てから作る）。
+   時刻合わせは正面と同じく速度の波形で行う。**比べるスクリプトは `compare_side_imu.py`（2026-11-03。合成データで確認、実データはまだ）**。
+   重さは**いちばん外側が 20 kg プレートになる重さ（60 kg か 100 kg）**（2026-11-03 にチートシートを明確にした: 外に小さいプレートがあると、
+   追跡の円の補正（半径 ±30 % の範囲で探す）が 2 つの縁の間で揺れて物差しがずれうる。バンパープレートは全部 45 cm なので気にしなくてよい）。
    横 ≈ IMU なら ×1.09 は正面の動画の側（協力者の動画を ÷1.09 で補正する根拠）、横も ×1.09 なら IMU が小さく出ている（6 面キャリブレーションで確かめる）。
    横だけでは、正面のずれが前傾（肩の点とバーの動きの違い）か身長からの換算かまでは分けられない。
    6 セットの根拠: 正面と IMU の MCV の倍率のセット間 SD 0.032（S001、13 セット）から、平均の倍率の 95 % 幅は 6 セットで ±0.034、3 セットで ±0.08（t 分布）。
