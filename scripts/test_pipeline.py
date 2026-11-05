@@ -400,6 +400,13 @@ def synthetic_features(seed=0) -> pd.DataFrame:
                     r.update({"imu_first_rep_mcv_mps": mcv, "imu_mean_rep_mcv_mps": mcv - 0.02,
                               "imu_velocity_loss_mcv_pct": (rpe - 5) * 6 if reps > 1 else np.nan,
                               "imu_first_rep_concentric_s": 0.5 / max(mcv, 0.1)})
+                # 最後・平均のレップの速度は、1 回目の速度と速度低下から作る（乱数は使わないので、ほかの列の値は変わらない）
+                vl = r["pose_velocity_loss_pct"] if reps > 1 else 0.0
+                r["pose_last_rep_mcv_bl"] = r["pose_first_rep_mcv_bl"] * (1 - vl / 100)
+                r["pose_mean_rep_mcv_bl"] = (r["pose_first_rep_mcv_bl"] + r["pose_last_rep_mcv_bl"]) / 2
+                if has_imu:
+                    vl = r["imu_velocity_loss_mcv_pct"] if reps > 1 else 0.0
+                    r["imu_last_rep_mcv_mps"] = mcv * (1 - vl / 100)
                 rows.append(r)
     return pd.DataFrame(rows)
 
@@ -427,6 +434,37 @@ def test_train_runs_end_to_end(tmp_path):
     feats = synthetic_features()
     assert set(res["train_set"]) == {"all"}
     assert set(res["eval_set"]) == ({"all", "rpe>=6"} if (feats["rpe"] < 6).any() else {"all"})
+    # 比べる相手（2026-11-05）: 平均を答えるだけの基準、最後のレップの速度だけ、速度の指標一式 ＋ 回数
+    new = {"mean_rpe", "imu_lrv", "imu_vbt", "video_lrv", "video_vbt"}
+    assert new <= set(res[res["scheme"] == "A_within"]["condition"])
+    b_conds = set(res[res["scheme"] == "B_loso"]["condition"])
+    assert {"mean_rpe", "video_lrv", "video_vbt"} <= b_conds and not {"imu_lrv", "imu_vbt"} & b_conds
+    # 基準の予測は、そのフォールドの学習データ（本人のほかのセッション）の RPE の平均
+    base = a[(a["condition"] == "mean_rpe") & (a["fold"] == "S001/SES001")]
+    expect = feats.loc[(feats["subject_id"] == "S001") & (feats["session_id"] != "SES001"), "rpe"].mean()
+    assert len(base) == 7 and np.allclose(base["pred"], expect)
+    # 合成データでは、速度の指標一式（速度低下を含む）の方が平均を答えるだけより当たる
+    mae = res[(res["scheme"] == "A_within") & (res["eval_set"] == "all")].set_index("condition")["mae"]
+    assert mae["video_vbt"] < mae["mean_rpe"] and mae["imu_vbt"] < mae["mean_rpe"]
+    # 基準は最良モデルの候補にしない・保存もしない。条件の意味を report.md に書く
+    import joblib
+    assert joblib.load(out / "best.pkl")["condition"] != "mean_rpe"
+    assert not (out / "mean_rpe__mean.pkl").exists() and (out / "video_vbt__ridge.pkl").exists()
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "## 条件の説明" in report and "最後のレップの速度だけ" in report
+
+
+def test_train_mean_baseline_predicts_training_mean():
+    """比べる基準（mean_rpe）は特徴を使わず、学習データの RPE の平均を答える"""
+    import train_rpe_model as trm
+    train = pd.DataFrame({"rpe": [6.0, 7.0, 8.0, 9.0]})
+    test = pd.DataFrame({"rpe": [5.0, 10.0]})
+    res, use = trm.fit_predict("mean", [], train, test)
+    assert use == [] and np.allclose(res[0], 7.5)
+    assert trm.fit_predict("linear", [], train, test)[0] is None      # 列の無いふつうのモデルは今までどおり学習しない
+    conds = trm.build_conditions(synthetic_features(), with_context=True)
+    assert {"mean_rpe", "imu_lrv", "imu_vbt", "video_lrv", "video_vbt"} <= set(conds)
+    assert conds["mean_rpe"]["baseline"] and "mean_rpe+ctx" not in conds
 
 
 def test_train_compares_training_rpe_range(tmp_path):

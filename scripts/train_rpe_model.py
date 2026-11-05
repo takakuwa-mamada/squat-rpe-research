@@ -12,13 +12,19 @@
    D. 学習曲線   その人の最初の k セッションだけで学習し、残りを予測（何試技で ±1 RPE か）
    ※ どの方式でも、同じセッションのセットが学習とテストにまたがることはない
 
- 比較条件（特徴量セット）:
+ 比較条件（特徴量セット。MCV = 上昇局面の平均速度）:
+   mean_rpe        学習データの RPE の平均をいつも答える  … 比べる基準（これより良くなければ特徴が役に立っていない）
    context         %1RM（無ければ重量）＋ 回数           … RPE 早見表に相当
-   imu_velocity    IMU の1レップ目 MCV だけ（線形回帰）   … VBT / Stance 相当
+   imu_velocity    IMU の1レップ目 MCV だけ（線形回帰）
+   imu_lrv         IMU の最後のレップの MCV だけ（線形回帰） … VBT でよく使う最終レップの速度
+   imu_vbt         IMU の速度の指標一式（1レップ目・最後・平均の MCV、速度低下）＋ 回数 … VBT / Stance 相当
    imu_all         IMU のレップ単位の特徴すべて
-   video_velocity  動画の1レップ目 MCV だけ（線形回帰）   … 動画だけの VBT
+   video_velocity  動画の1レップ目 MCV だけ（線形回帰）
+   video_lrv       動画の最後のレップの MCV だけ（線形回帰）
+   video_vbt       動画の速度の指標一式 ＋ 回数            … 動画だけの VBT
    video_all       動画（骨格）の特徴すべて               … 最終目標（動画だけ）
    imu+video       IMU ＋ 動画
+   ※ mean_rpe は比べる基準なので、best.pkl の候補にせず、モデルも保存しない（2026-11-05 追加）
    --with-context で、各条件に %1RM・回数を足した版（*+ctx）も出す
    IMU の条件は IMU のある試技（本人）だけで評価する
 
@@ -67,12 +73,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker
+from matplotlib.lines import Line2D
 import joblib
 
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression, RidgeCV
+from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.base import clone
@@ -115,6 +123,26 @@ VIDEO_FEATURES = [
 ]
 IMU_KEY = "imu_first_rep_mcv_mps"      # これが無い試技は IMU 条件から外す
 VIDEO_KEY = "pose_first_rep_mcv_bl"    # これが無い試技は動画条件から外す
+# VBT でふつう使う速度の指標（1レップ目・最後・平均の MCV、速度低下）。回数は条件の側で足す
+IMU_LRV, VIDEO_LRV = "imu_last_rep_mcv_mps", "pose_last_rep_mcv_bl"
+IMU_VBT = [IMU_KEY, IMU_LRV, "imu_mean_rep_mcv_mps", "imu_velocity_loss_mcv_pct"]
+VIDEO_VBT = [VIDEO_KEY, VIDEO_LRV, "pose_mean_rep_mcv_bl", "pose_velocity_loss_pct"]
+BASELINE_COND = "mean_rpe"             # 比べる基準（特徴を使わず、学習データの RPE の平均を答える）
+
+# report.md の「条件の説明」に出す文（スクリプトの中の名前を説明なしで使わないため）
+COND_DESC = {
+    "mean_rpe":       "比べる基準。学習データの RPE の平均をいつも答える（特徴は使わない）",
+    "context":        "%1RM（無ければ重量）と回数だけ（RPE 早見表に相当）",
+    "imu_velocity":   "IMU の 1 回目のレップの速度（MCV）だけ",
+    "imu_lrv":        "IMU の最後のレップの速度だけ（VBT でよく使う最終レップの速度）",
+    "imu_vbt":        "IMU の速度の指標一式（1 回目・最後・平均の速度、速度低下）＋ 回数",
+    "imu_all":        "IMU のレップ単位の特徴すべて（12 個）",
+    "video_velocity": "動画の 1 回目のレップの速度だけ",
+    "video_lrv":      "動画の最後のレップの速度だけ",
+    "video_vbt":      "動画の速度の指標一式（1 回目・最後・平均の速度、速度低下）＋ 回数",
+    "video_all":      "動画（骨格）の特徴すべて（速度・深さ・左右の傾きなど 22 個）",
+    "imu+video":      "IMU と動画の特徴すべて",
+}
 
 
 def build_conditions(df: pd.DataFrame, with_context: bool) -> dict:
@@ -123,11 +151,18 @@ def build_conditions(df: pd.DataFrame, with_context: bool) -> dict:
     context = [ctx_w, "reps_completed"]
     # needs: その条件が使うデータ。学習に使えない（quality_checks.py で外す）セットはその条件から外す
     conds = {
+        BASELINE_COND:    {"cols": [], "key": [], "models": ["mean"], "needs": [], "baseline": True},
         "context":        {"cols": context, "key": context, "models": ["linear", "hgb"], "needs": []},
         "imu_velocity":   {"cols": [IMU_KEY], "key": [IMU_KEY], "models": ["linear"], "needs": ["imu"]},
+        "imu_lrv":        {"cols": [IMU_LRV], "key": [IMU_KEY], "models": ["linear"], "needs": ["imu"]},
+        "imu_vbt":        {"cols": IMU_VBT + ["reps_completed"], "key": [IMU_KEY], "models": ["ridge"],
+                           "needs": ["imu"]},
         "imu_all":        {"cols": IMU_FEATURES, "key": [IMU_KEY], "models": ["ridge", "rf", "hgb"],
                            "needs": ["imu"]},
         "video_velocity": {"cols": [VIDEO_KEY], "key": [VIDEO_KEY], "models": ["linear"], "needs": ["video"]},
+        "video_lrv":      {"cols": [VIDEO_LRV], "key": [VIDEO_KEY], "models": ["linear"], "needs": ["video"]},
+        "video_vbt":      {"cols": VIDEO_VBT + ["reps_completed"], "key": [VIDEO_KEY], "models": ["ridge"],
+                           "needs": ["video"]},
         "video_all":      {"cols": VIDEO_FEATURES, "key": [VIDEO_KEY], "models": ["ridge", "rf", "hgb"],
                            "needs": ["video"]},
         "imu+video":      {"cols": IMU_FEATURES + VIDEO_FEATURES, "key": [IMU_KEY, VIDEO_KEY],
@@ -142,6 +177,8 @@ def build_conditions(df: pd.DataFrame, with_context: bool) -> dict:
 
 
 def make_model(name: str):
+    if name == "mean":  # 比べる基準: 学習データの RPE の平均をいつも答える
+        return DummyRegressor(strategy="mean")
     if name == "linear":
         return Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler()),
                          ("m", LinearRegression())])
@@ -171,13 +208,15 @@ def metrics(y, p) -> dict:
 
 
 def fit_predict(model_name, cols, train, test, clip_lo=RPE_FLOOR):
-    """列が学習データで全部欠損なら落としてから学習する。予測は [clip_lo, 10] に収める"""
+    """列が学習データで全部欠損なら落としてから学習する。予測は [clip_lo, 10] に収める。
+    model_name == "mean"（比べる基準）は列を使わない（学習データの RPE の平均を答える）"""
     use = [c for c in cols if c in train and train[c].notna().any()]
-    if not use or len(train) < 3:
+    if len(train) < 3 or (not use and model_name != "mean"):
         return None, use
+    X = (lambda d: d[use].to_numpy(float) if use else np.zeros((len(d), 1)))
     m = make_model(model_name)
-    m.fit(train[use].to_numpy(float), train["rpe"].to_numpy(float))
-    pred = np.clip(m.predict(test[use].to_numpy(float)), clip_lo, RPE_MAX)
+    m.fit(X(train), train["rpe"].to_numpy(float))
+    pred = np.clip(m.predict(X(test)), clip_lo, RPE_MAX)
     return (pred, m), use
 
 
@@ -287,7 +326,9 @@ def scheme_curves(df, conds, train_sets, eval_sets, kmax, log):
     """C. 汎用＋本人 k セッション / D. 本人だけの学習曲線（各条件の代表モデルで、学習・評価の範囲ごと）"""
     rows = []
     for cname, cond in conds.items():
-        mname = "linear" if cond["models"] == ["linear"] else "hgb"
+        # 代表モデル: 線形回帰だけの条件は linear、HGB がある条件は HGB（欠損を扱える）、ほかはその条件のモデル
+        models = cond["models"]
+        mname = "linear" if models == ["linear"] else ("hgb" if "hgb" in models else models[0])
         d = eligible(df, cond)
         subs = sorted(d["subject_id"].unique())
         for sid in subs:
@@ -371,7 +412,8 @@ def fig_compare(res: pd.DataFrame, scheme: str, out: Path, title: str):
         return None
     best = r.sort_values("mae").groupby("condition").head(1).sort_values("mae")
     fig, ax = plt.subplots(figsize=(8, 0.5 * len(best) + 1.5))
-    ax.barh(best["condition"] + " (" + best["model"] + ")", best["mae"], color="#4C72B0")
+    colors = ["#999999" if c == BASELINE_COND else "#4C72B0" for c in best["condition"]]   # 基準は灰色
+    ax.barh(best["condition"] + " (" + best["model"] + ")", best["mae"], color=colors)
     for i, (m, h, n) in enumerate(zip(best["mae"], best["hit10"], best["n"])):
         ax.text(m, i, f"  MAE {m:.2f} / ±1以内 {h:.0%} (n={n})", va="center", fontsize=9)
     ax.invert_yaxis()
@@ -384,6 +426,30 @@ def fig_compare(res: pd.DataFrame, scheme: str, out: Path, title: str):
     return out.name
 
 
+# 学習曲線の線の色: 特徴の種類ごとに決まった色（条件が増えても色が一巡して重ならないように、
+# データ（IMU / 動画 / IMU＋動画）ごとに図を分け、1 枚の中は種類で色を分ける）
+CURVE_KINDS = [  # (種類, 凡例の説明, 色)
+    ("velocity", "1 回目のレップの速度", "#2a78d6"),
+    ("lrv", "最後のレップの速度", "#eb6834"),
+    ("vbt", "速度の指標一式＋回数", "#1baf7a"),
+    ("all", "特徴すべて", "#eda100"),
+    ("context", "%1RM・回数", "#e87ba4"),
+]
+BASELINE_COLOR = "#8a8a8a"
+CURVE_SOURCES = {"imu": "IMU", "video": "動画", "imu+video": "IMU＋動画"}
+
+
+def curve_parts(cond: str):
+    """条件名 → (データ, 種類, %1RM・回数を足した版か)。context と mean_rpe はデータを問わず全部の図に出す"""
+    base = cond.removesuffix("+ctx")
+    if base in ("context", BASELINE_COND):
+        return None, base, False
+    if base == "imu+video":
+        return "imu+video", "all", cond.endswith("+ctx")
+    src, kind = base.split("_", 1)                  # imu_lrv → ("imu", "lrv")
+    return src, kind, cond.endswith("+ctx")
+
+
 def fig_curve(curves: pd.DataFrame, scheme: str, out: Path, title: str):
     c = curves[curves["scheme"] == scheme]
     if c.empty:
@@ -394,20 +460,41 @@ def fig_curve(curves: pd.DataFrame, scheme: str, out: Path, title: str):
                                             w_hit=("w_hit", "sum"), n_train=("n_train_me", "mean"))
            .reset_index())
     agg["mae"], agg["hit10"] = agg["w_mae"] / agg["n"], agg["w_hit"] / agg["n"]
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-    for cond, g in agg.groupby("condition"):
-        axes[0].plot(g["k"], g["mae"], marker="o", label=cond)
-        axes[1].plot(g["k"], g["hit10"], marker="o", label=cond)
-    axes[0].set_ylabel("MAE [RPE]")
-    axes[1].set_ylabel("±1 RPE 以内の割合")
-    axes[1].axhline(0.8, color="gray", lw=0.8, ls="--")
-    for a in axes:
-        a.set_xlabel("学習に使った本人のセッション数 k")
+    parts = {cond: curve_parts(cond) for cond in agg["condition"].unique()}
+    srcs = [s for s in CURVE_SOURCES if any(p[0] == s for p in parts.values())] or [None]
+    color = {k: col for k, _, col in CURVE_KINDS} | {BASELINE_COND: BASELINE_COLOR}
+
+    def style(kind, ctx):
+        return dict(color=color.get(kind, "#444444"), lw=2, marker="o", ms=5,
+                    ls="--" if kind == BASELINE_COND else (":" if ctx else "-"),
+                    mfc="white" if ctx else color.get(kind, "#444444"))
+
+    fig, axes = plt.subplots(2, len(srcs), figsize=(4.3 * len(srcs) + 0.8, 7.6),
+                             sharex=True, sharey="row", squeeze=False)
+    for j, src in enumerate(srcs):
+        for cond, g in agg.groupby("condition"):
+            s, kind, ctx = parts[cond]
+            if s in (src, None):
+                axes[0, j].plot(g["k"], g["mae"], **style(kind, ctx))
+                axes[1, j].plot(g["k"], g["hit10"], **style(kind, ctx))
+        axes[0, j].set_title(CURVE_SOURCES.get(src, ""))
+        axes[1, j].axhline(0.8, color="#bbbbbb", lw=0.8, ls=":")
+        axes[1, j].set_xlabel("学習に使った本人のセッション数 k")
+    axes[0, 0].set_ylabel("MAE [RPE]（小さいほど良い）")
+    axes[1, 0].set_ylabel("±1 RPE 以内の割合")
+    for a in axes.flat:
         a.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
         a.grid(alpha=0.3)
-    axes[0].legend(fontsize=8)
+    # 凡例は図の下に 1 つだけ（線に重ねない）。種類の名前は条件名の後半（imu_lrv の lrv）
+    kinds = {p[1] for p in parts.values()}
+    handles = [Line2D([], [], label=f"{k}（{desc}）", **style(k, False)) for k, desc, _ in CURVE_KINDS if k in kinds]
+    if BASELINE_COND in kinds:
+        handles.append(Line2D([], [], label=f"{BASELINE_COND}（平均を答える基準）", **style(BASELINE_COND, False)))
+    if any(p[2] for p in parts.values()):
+        handles.append(Line2D([], [], label="点線・白抜き = ＋%1RM・回数", **style(None, True)))
+    fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8.5, frameon=False)
     fig.suptitle(title)
-    plt.tight_layout()
+    fig.tight_layout(rect=(0, 0.035 * ((len(handles) + 2) // 3) + 0.02, 1, 1))
     fig.savefig(out, dpi=130)
     plt.close(fig)
     return out.name
@@ -562,8 +649,10 @@ def main():
             figs["C"] = f
     primary = "B_loso" if (not res_main.empty and (res_main["scheme"] == "B_loso").any()) else "A_within"
     best_row = None
-    if not res_main.empty and (res_main["scheme"] == primary).any():
-        best_row = res_main[res_main["scheme"] == primary].sort_values("mae").iloc[0]
+    cand = (res_main[(res_main["scheme"] == primary) & (res_main["condition"] != BASELINE_COND)]
+            if not res_main.empty else res_main)                 # 比べる基準は最良モデルの候補にしない
+    if not cand.empty:
+        best_row = cand.sort_values("mae").iloc[0]
         bp = pred[(pred["scheme"] == primary) & (pred["condition"] == best_row["condition"])
                   & (pred["model"] == best_row["model"]) & (pred["train_set"] == MAIN_TRAIN)]
         if eval_sets[main_eval] is not None:
@@ -587,6 +676,8 @@ def main():
     # 全データで学習し直したモデル（predict_rpe.py 用）
     saved = []
     for cname, cond in conds.items():
+        if cond.get("baseline"):          # 比べる基準は予測に使わないので保存しない
+            continue
         d = eligible(df, cond)
         for mname in cond["models"]:
             res_fit, use = fit_predict(mname, cond["cols"], d, d.head(1))
@@ -615,6 +706,13 @@ def main():
                   "データが欠けている・レップを取り違えているセットは、そのデータ（IMU / 動画）を使う条件の"
                   "学習とテストから外した（context の条件には残る）。基準は `quality_checks.py`（品質レポートと同じ）。",
                   "", md_table(tab), ""]
+    # 条件の説明（表に出る条件名の意味。MCV = 上昇局面の平均速度）
+    desc = pd.DataFrame([{"condition": c, "使うもの": COND_DESC.get(c.removesuffix("+ctx"), "")
+                          + ("（＋ %1RM・回数）" if c.endswith("+ctx") else ""),
+                          "models": " / ".join(conds[c]["models"])} for c in conds])
+    lines += ["## 条件の説明", "",
+              f"`{BASELINE_COND}` は比べる基準。これより MAE が小さくなければ、その条件の特徴は RPE を当てるのに"
+              "役立っていない。速度は MCV（上昇局面の平均速度）。", "", md_table(desc), ""]
     if not res_main.empty:
         for sch, t in titles.items():
             r = res_main[res_main["scheme"] == sch]
