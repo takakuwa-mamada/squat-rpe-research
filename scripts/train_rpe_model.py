@@ -11,6 +11,8 @@
    C. 汎用＋本人 他の人 ＋ その人の最初の k セッションで学習し、残りのセッションを予測
    D. 学習曲線   その人の最初の k セッションだけで学習し、残りを予測（何試技で ±1 RPE か）
    ※ どの方式でも、同じセッションのセットが学習とテストにまたがることはない
+   ※ C・D の曲線は、各条件を線形回帰（無ければリッジ）で描く。少ないセッションでも学習できるモデルにそろえるため
+     （HGB は学習が 10 セット未満だと平均を答えるだけになる。2026-11-05 修正）。A・B の表のいちばん良いモデルとは違うことがある
 
  比較条件（特徴量セット。MCV = 上昇局面の平均速度）:
    mean_rpe        学習データの RPE の平均をいつも答える  … 比べる基準（これより良くなければ特徴が役に立っていない）
@@ -322,13 +324,22 @@ def scheme_loso(df, conds, train_sets, min_subjects, log):
     return rows
 
 
+def curve_model(models: list) -> str:
+    """学習曲線（C・D）で条件を代表させるモデル: 線形回帰があれば linear、無ければリッジ、どちらも無ければその条件のモデル。
+    少ないセッションでも学習できるモデルにそろえる（2026-11-05 修正）。それまでは HGB がある条件（context・特徴すべて）を
+    HGB で描いていたが、HGB は分けた先に 5 セット以上要る（min_samples_leaf=5）ので、学習が 10 セット未満だと分けられず
+    平均を答えるだけになり、少ないセッションの曲線が基準（mean_rpe）の線と重なって実際より悪く見えていた"""
+    for name in ("linear", "ridge"):
+        if name in models:
+            return name
+    return models[0]
+
+
 def scheme_curves(df, conds, train_sets, eval_sets, kmax, log):
-    """C. 汎用＋本人 k セッション / D. 本人だけの学習曲線（各条件の代表モデルで、学習・評価の範囲ごと）"""
+    """C. 汎用＋本人 k セッション / D. 本人だけの学習曲線（各条件の代表モデル curve_model で、学習・評価の範囲ごと）"""
     rows = []
     for cname, cond in conds.items():
-        # 代表モデル: 線形回帰だけの条件は linear、HGB がある条件は HGB（欠損を扱える）、ほかはその条件のモデル
-        models = cond["models"]
-        mname = "linear" if models == ["linear"] else ("hgb" if "hgb" in models else models[0])
+        mname = curve_model(cond["models"])
         d = eligible(df, cond)
         subs = sorted(d["subject_id"].unique())
         for sid in subs:
@@ -437,6 +448,7 @@ CURVE_KINDS = [  # (種類, 凡例の説明, 色)
 ]
 BASELINE_COLOR = "#8a8a8a"
 CURVE_SOURCES = {"imu": "IMU", "video": "動画", "imu+video": "IMU＋動画"}
+MODEL_JA = {"linear": "線形回帰", "ridge": "リッジ", "hgb": "HGB", "rf": "ランダムフォレスト"}
 
 
 def curve_parts(cond: str):
@@ -485,13 +497,22 @@ def fig_curve(curves: pd.DataFrame, scheme: str, out: Path, title: str):
     for a in axes.flat:
         a.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
         a.grid(alpha=0.3)
-    # 凡例は図の下に 1 つだけ（線に重ねない）。種類の名前は条件名の後半（imu_lrv の lrv）
+    # 凡例は図の下に 1 つだけ（線に重ねない）。種類の名前は条件名の後半（imu_lrv の lrv）。
+    # 線を描いたモデルも添える（A・B の表のいちばん良いモデルとは違うことがある）
+    model_of = c.groupby("condition")["model"].first()
+
+    def with_models(text: str, match) -> str:
+        ms = sorted({MODEL_JA.get(model_of[cd], model_of[cd]) for cd, p in parts.items() if match(p)})
+        return f"{text}／{'・'.join(ms)}" if ms else text
+
     kinds = {p[1] for p in parts.values()}
-    handles = [Line2D([], [], label=f"{k}（{desc}）", **style(k, False)) for k, desc, _ in CURVE_KINDS if k in kinds]
+    handles = [Line2D([], [], label=f"{k}（{with_models(desc, lambda p, k=k: p[1] == k and not p[2])}）",
+                      **style(k, False)) for k, desc, _ in CURVE_KINDS if k in kinds]
     if BASELINE_COND in kinds:
         handles.append(Line2D([], [], label=f"{BASELINE_COND}（平均を答える基準）", **style(BASELINE_COND, False)))
     if any(p[2] for p in parts.values()):
-        handles.append(Line2D([], [], label="点線・白抜き = ＋%1RM・回数", **style(None, True)))
+        handles.append(Line2D([], [], label="点線・白抜き = " + with_models("＋%1RM・回数", lambda p: p[2]),
+                              **style(None, True)))
     fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8.5, frameon=False)
     fig.suptitle(title)
     fig.tight_layout(rect=(0, 0.035 * ((len(handles) + 2) // 3) + 0.02, 1, 1))
@@ -741,10 +762,12 @@ def main():
             piv = piv.reindex(columns=[(tr, ev) for tr in train_sets for ev in eval_sets]).fillna("—")
             piv.columns = [f"学習 {label_train(tr)} → 評価 {label_eval(ev)}" for tr, ev in piv.columns]
             lines += [f"### {t}", "", md_table(piv.reset_index()), ""]
+    curve_note = ("曲線は各条件を線形回帰（無ければリッジ）で描いている（凡例に表示）。少ないセッションでも学習できる"
+                  "モデルにそろえるためで、上の表のいちばん良いモデルとは違うことがある。")
     for key, t in [("D", "## D. 本人のデータだけで学習（何セッションで実用水準か）"),
                    ("C", "## C. 汎用モデル ＋ 本人 k セッション（パーソナライズの効果）")]:
         if key in figs:
-            lines += [t, "", f"![]({figs[key]})", ""]
+            lines += [t, "", curve_note, "", f"![]({figs[key]})", ""]
     if "scatter" in figs:
         lines += ["## 最良モデルの予測", "", f"![]({figs['scatter']})", ""]
     for k in [k for k in figs if k.startswith("imp_")]:

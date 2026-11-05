@@ -425,6 +425,10 @@ def test_train_runs_end_to_end(tmp_path):
         set(res[res["scheme"] == "B_loso"]["condition"])          # IMU は本人だけ → 汎用評価なし
     curves = pd.read_csv(out / "curves.csv")
     assert {"C_general_plus_k", "D_personal_curve"} <= set(curves["scheme"])
+    # 曲線は線形回帰（無ければリッジ）で描く（HGB は学習が 10 セット未満だと平均を答えるだけになる。2026-11-05）
+    cm = curves.groupby("condition")["model"].first()
+    assert (cm["context"], cm["video_velocity"], cm["video_vbt"], cm["video_all"], cm["imu+video"],
+            cm["mean_rpe"]) == ("linear", "linear", "ridge", "ridge", "ridge", "mean")
     assert (out / "report.md").exists() and (out / "best.pkl").exists()
     # 同じセッションが学習とテストにまたがっていない（A: フォールド = 被験者/セッション）
     pred = pd.read_csv(out / "predictions.csv")
@@ -465,6 +469,23 @@ def test_train_mean_baseline_predicts_training_mean():
     conds = trm.build_conditions(synthetic_features(), with_context=True)
     assert {"mean_rpe", "imu_lrv", "imu_vbt", "video_lrv", "video_vbt"} <= set(conds)
     assert conds["mean_rpe"]["baseline"] and "mean_rpe+ctx" not in conds
+
+
+def test_curve_model_avoids_hgb_on_small_training_sets():
+    """学習曲線は線形回帰（無ければリッジ）で描く。HGB は学習が 10 セット未満だと分けられず、平均を答えるだけになるため"""
+    import train_rpe_model as trm
+    assert trm.curve_model(["linear", "hgb"]) == "linear"          # context
+    assert trm.curve_model(["ridge", "rf", "hgb"]) == "ridge"      # 特徴すべて
+    assert trm.curve_model(["ridge", "hgb"]) == "ridge"            # --with-context の *+ctx
+    assert trm.curve_model(["mean"]) == "mean"
+    # 8 セット（本人の 2 セッション分ほど）。速いほど RPE が低い
+    train = pd.DataFrame({"v": np.linspace(0.30, 0.60, 8)})
+    train["rpe"] = 10 - 10 * (train["v"] - 0.30)
+    test = pd.DataFrame({"v": [0.32, 0.58], "rpe": [9.8, 7.2]})
+    hgb = trm.fit_predict("hgb", ["v"], train, test)[0][0]
+    assert np.allclose(hgb, train["rpe"].mean())                   # 分けられず平均を答える
+    ridge = trm.fit_predict(trm.curve_model(["ridge", "rf", "hgb"]), ["v"], train, test)[0][0]
+    assert ridge[0] > ridge[1] + 1                                 # 速さの違いを拾う
 
 
 def test_train_compares_training_rpe_range(tmp_path):
