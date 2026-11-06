@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>スクワット計測チェックリスト</title>
+<!--
+  計測チェックリスト（正面撮影・1 セット＝動画 1 本・M5 ファーム v4）。2026-11-06 版。これが元のファイル。
+  内容は CLAUDE.md §9 と docs/チートシート.txt に合わせる。直したら PDF も作り直す（A4 1 枚に収める）:
+    Edge で開いて印刷 →「PDF に保存」（ヘッダーとフッターは切る）、または
+    & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --headless=new --no-pdf-header-footer
+        --user-data-dir=<作業用フォルダ> --print-to-pdf=<出力.pdf> file:///<この html を英数字だけのパスに写したもの>
+-->
+<style>
+  @page { size: A4; margin: 9mm 11mm; }
+  :root {
+    --ink: #1b1d22; --navy: #1f3864; --red: #b3261e; --green: #23633a; --grey: #5c6370;
+    --blue: #e2eaf5; --amber: #fdf0d5; --amber-line: #e3a34a; --amber-num: #f8dcb6; --rose: #f8e2e0; --rose-line: #e2b4b0;
+    --mint: #e3f0e0; --rule: #c4cfdd; --paper: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: "Yu Gothic UI", "Yu Gothic", "YuGothic", "Meiryo", "Hiragino Sans", sans-serif;
+    font-size: 9.2pt; line-height: 1.42;
+  }
+  .page { max-width: 188mm; margin: 0 auto; }
+  h1 { font-size: 16pt; color: var(--navy); margin: 0; letter-spacing: .03em; text-wrap: balance; }
+  .sub { color: var(--grey); font-size: 8.4pt; margin: .6mm 0 1.6mm; }
+  .meta {
+    display: flex; flex-wrap: wrap; gap: 2mm 9mm; font-size: 9.6pt;
+    border-bottom: 1.4pt solid var(--navy); padding-bottom: 1.4mm; margin-bottom: 2.6mm;
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2.6mm 4.5mm; align-items: start; }
+  .col { display: flex; flex-direction: column; gap: 2.6mm; min-width: 0; }
+  .wide { grid-column: 1 / -1; }
+  section { break-inside: avoid; min-width: 0; }
+  h2 { font-size: 9.8pt; color: var(--navy); margin: 0 0 .9mm; padding: .7mm 2mm; border-radius: .8mm; }
+  .s-blue h2 { background: var(--blue); }
+  .s-amber h2 { background: var(--amber); }
+  .s-rose h2 { background: var(--rose); }
+  .s-mint h2 { background: var(--mint); }
+  ul.cl { list-style: none; margin: 0; padding: 0 0 0 .6mm; }
+  ul.cl li { padding-left: 4.4mm; text-indent: -4.4mm; margin: .3mm 0; }
+  ul.cl li::before { content: "□"; color: var(--grey); margin-right: 1.1mm; }
+  .crit { color: var(--red); font-weight: 700; }
+  .note { display: block; text-indent: 0; color: var(--grey); font-size: 7.9pt; line-height: 1.35; margin-top: .2mm; }
+  .note.crit { color: var(--red); font-weight: 400; }
+  code {
+    font-family: "Consolas", "BIZ UDGothic", monospace; font-size: 8.2pt; color: var(--green);
+    overflow-wrap: anywhere;
+  }
+  .note code { font-size: 7.6pt; }
+  ol.steps { list-style: none; margin: 0; padding: 0; border: .8pt solid var(--amber-line); border-radius: .8mm; overflow: hidden; counter-reset: s; }
+  ol.steps li { counter-increment: s; display: grid; grid-template-columns: 6mm 1fr; border-top: .5pt solid #f1d2a6; }
+  ol.steps li:first-child { border-top: 0; }
+  ol.steps li::before { content: counter(s); font-weight: 700; color: #a4510a; background: var(--amber-num); text-align: center; padding: .55mm 0; }
+  ol.steps li span { padding: .55mm 2mm; background: #fffaf0; }
+  .after { margin: 1mm 0 0; }
+  table.tr { width: 100%; border-collapse: collapse; font-size: 8.3pt; }
+  table.tr td { border: .5pt solid var(--rose-line); padding: .6mm 1.8mm; vertical-align: top; }
+  table.tr td:first-child { color: var(--red); font-weight: 700; width: 33%; }
+  footer { margin-top: 2.4mm; border-top: .6pt solid var(--rule); padding-top: 1mm; color: var(--grey); font-size: 7.6pt; }
+  @media screen and (max-width: 640px) {
+    body { font-size: 11pt; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 16px; }
+    .grid { grid-template-columns: 1fr; }
+    code { font-size: 10pt; }
+    .note code { font-size: 9.4pt; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>スクワット計測　当日チェックリスト</h1>
+  <p class="sub">正面撮影 ・ 1 セット＝動画 1 本 ・ M5 ファーム v4 ・ 2026-11-06 版</p>
+  <div class="meta">
+    <span>日付　____ / ____</span>
+    <span>この日の回数　____ 回（1 日の中は固定）</span>
+    <span>横から撮るセット　あり ・ なし</span>
+  </div>
+
+  <div class="grid">
+    <div class="col">
+      <section class="s-blue">
+        <h2>1. 持ち物</h2>
+        <ul class="cl">
+          <li>M5StickC Plus（満充電・ファーム v4。Wi-Fi で送り続けると 30〜60 分しかもたない）＋ 固定用バンド</li>
+          <li>ノート PC（充電済み）</li>
+          <li>スマホ ＋ 三脚</li>
+          <li>テザリング（2.4 GHz）</li>
+          <li>養生テープ（三脚の位置の目印）</li>
+        </ul>
+      </section>
+
+      <section class="s-blue">
+        <h2>2. セットアップ</h2>
+        <ul class="cl">
+          <li>テザリング ON → PC を接続</li>
+          <li><code>python scripts\multi_imu_receiver.py</code> → 「重量 回数」を入れる（例 <code>90 8</code>）</li>
+          <li>M5 の電源 ON → 画面が「PC:… A」（緑）になる</li>
+          <li>M5 はバーの端（プレートの外側・動画で右側＝自分の左）。画面が真上、毎回同じ位置</li>
+          <li class="crit">バーを水平にして az ≈ +1.0 g
+            <span class="note crit">−1.0 なら裏返す／0 付近なら 90° 回す。ここを外すと全部使えない</span></li>
+          <li>カメラ：バーベルの真正面・2.5〜3 m・腰の高さ・縦向き・三脚</li>
+          <li>頭から足先まで全身が入る（しゃがんでも、ラックから出ても切れない）
+            <span class="note">足先が切れると、そのセットの動画は学習に使えない</span></li>
+          <li>三脚の脚の位置に養生テープで目印</li>
+        </ul>
+      </section>
+    </div>
+
+    <section class="s-amber">
+      <h2>3. 各セット（繰り返し）</h2>
+      <ol class="steps">
+        <li><span>重さを付ける（重量・回数が変わるときは、グラフ画面で <b>w</b> → ターミナルで入力）</span></li>
+        <li><span>スマホの録画開始</span></li>
+        <li><span>PC で <b>SPACE</b>（セット開始）</span></li>
+        <li><span>ラックアウト → 挙上 → ラックイン</span></li>
+        <li><span>PC で <b>SPACE</b>（セット終了）</span></li>
+        <li><span class="crit">RPE を声に出す（速度を見る前・15 秒以内・後から変えない）</span></li>
+        <li><span class="crit">数字キー　5〜9 ／ 0 ＝ RPE 10</span></li>
+        <li><span>録画停止</span></li>
+      </ol>
+      <ul class="cl after">
+        <li>撮った順がそのままセット番号（1 セット＝動画 1 本）</li>
+        <li>1 日の中は回数を固定し、重さで RPE を変える（RPE 6〜10 に散らす）</li>
+        <li class="crit">失敗するまで挙げない</li>
+        <li>押し間違えたら <b>u</b> で取り消し</li>
+      </ul>
+    </section>
+
+    <section class="s-amber">
+      <h2>4. 横から撮るセット（IMU の確認用・アップでよい）</h2>
+      <ul class="cl">
+        <li class="crit">受信を別のフォルダで起動 <code>python scripts\multi_imu_receiver.py --outdir data\_side</code>
+          <span class="note">忘れたら、帰宅後にその受信フォルダを <code>data\_sessions</code> から <code>data\_side</code> へ移す</span></li>
+        <li>重さは 60 kg か 100 kg（いちばん外側が 20 kg プレート＝直径 45 cm）
+          <span class="note">40 kg など外側が小さいプレートは直径が分からず、比べられない</span></li>
+        <li>スマホは三脚で M5 側（自分の左）の真横。プレートがまん丸に見える位置・腰の高さ・縦向き</li>
+        <li>プレートが画面の幅の 1/3 くらいに写る距離。上から下まで切れない・ラックやセーフティで隠れない（最初の 1 本で確認）</li>
+        <li>本番と同じく、回と回の間は立って 2 秒ほど止まる
+          <span class="note">本番と同じ条件で比べるため（11/6 の 60 kg は 0.6 秒だった）</span></li>
+        <li>RPE は入れない。録画開始 → SPACE → ラックアウト → 挙上 → ラックイン → SPACE → 録画停止</li>
+        <li>合計 6 セット（できれば 2 日に分けて 3 セットずつ）。終わったら q → 本番の受信を起動</li>
+      </ul>
+    </section>
+
+    <div class="col">
+      <section class="s-blue">
+        <h2>5. 終わったら（その場で）</h2>
+        <ul class="cl">
+          <li><b>q</b> で終了（q で終えないと markers.csv が出ない）</li>
+          <li>mean Hz が 90〜100</li>
+          <li>セット数と動画の本数が同じ</li>
+          <li>RPE の入れ忘れがない</li>
+          <li>記録ログに記入（睡眠・体重・体調・前回からの間隔）</li>
+        </ul>
+      </section>
+
+      <section class="s-mint">
+        <h2>6. 帰宅後</h2>
+        <ul class="cl">
+          <li>動画を切るときは、1 回目の前と最後の後に 1 秒ずつ立っている時間を残す</li>
+          <li>動画を <code>data\_sessions\session_…\</code> の直下へ（受信を何回か起動した日は、フォルダごとにそのセットの動画。横から撮った分は <code>data\_side\session_…\</code>）</li>
+          <li><code>python scripts\run_pipeline.py</code> → 最後の品質レポートで「要確認」を見る
+            <span class="note">[待ち] と出たら、そのフォルダに動画が入っていない</span></li>
+          <li>横から撮った日は <code>python scripts\compare_side_imu.py</code></li>
+        </ul>
+      </section>
+    </div>
+
+    <section class="s-rose wide">
+      <h2>7. うまくいかないとき</h2>
+      <table class="tr">
+        <tr><td>M5 の PC: が黄色のまま</td><td>受信スクリプトが動いているか／Windows ファイアウォールで Python を許可</td></tr>
+        <tr><td>az が 1.0 にならない</td><td>M5 の画面が真上を向いているか</td></tr>
+        <tr><td>mean Hz が 50 未満</td><td>Wi-Fi が弱い。PC をラックに近づける</td></tr>
+        <tr><td>足元が画面から切れる</td><td>三脚を離す、または低くする</td></tr>
+        <tr><td>正面から撮れていない</td><td>カメラをバーベルの真正面へ</td></tr>
+        <tr><td>横の動画でプレートを見つけ損ねた</td><td><code>data\_side\session_…\plate\*_bar_roi_preview.png</code> の緑の円がプレートの縁に重なっているか。小さいプレート・ラックで隠れていないか</td></tr>
+      </table>
+    </section>
+  </div>
+
+  <footer>元のファイルは docs/計測チェックリスト.html（直したら PDF も作り直す）。手順の詳しい説明は docs/チートシート.txt。</footer>
+</div>
+</body>
+</html>
