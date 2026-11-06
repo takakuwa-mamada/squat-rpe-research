@@ -282,14 +282,21 @@ def select_reps(v_hp, fs, dt, expected_reps=None, min_rom=0.15):
     return [(ds, dmin, pk) for ds, dmin, pk, _ in cands]
 
 
-def solve_lockout(v_raw, a0, pk, fs, dt):
+def solve_lockout(v_raw, a0, pk, fs, dt, limit=None):
     """
     1レップ分のドリフトを解く。立位（a0: 速度 0）から始まり、ロックアウト T で
     「速度 0 かつ 変位 0（立位の高さに戻る）」になるように、一定のずれ（センサのバイアス）を引く。
-    T は上昇ピーク以降で変位の残りが最小になる最初の時刻。
+    T は上昇ピークの後 2.5 秒の中で、変位の残りが最小に近い最初の時刻。
+    limit（次のレップの下降の始まり）があれば、T はそれより後にしない（2026-11-06 修正）。
+    それまでは、回と回の間が短いと（立ち上がってから次のしゃがみ始めまで 0.5〜0.6 秒）2.5 秒の中に次のレップの
+    しゃがみが入り、そこで変位の残りが 0 を横切るので T を次のレップの中に取り違え、そのレップと次のレップの速度が
+    崩れていた（11/6 の 80 kg×8 の 4 回目が IMU 0.083 m/s、動画 0.545 m/s）。
+    limit が上昇ピークの直後より前にある（区切りがおかしい）ときは使わない。
     戻り値: (T, 補正後の速度 v[a0:T+1])
     """
     lo, hi = pk + max(1, int(0.05 * fs)), min(len(v_raw) - 1, pk + int(2.5 * fs))
+    if limit is not None and int(limit) >= lo:
+        hi = min(hi, int(limit))
     results = []
     for T in range(lo, hi + 1):
         seg = v_raw[a0:T + 1] - v_raw[a0]
@@ -380,6 +387,7 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
 
     速度はレップごとに「ロックアウトで速度0・変位0」でドリフトを解き直したもの
     （挙上の直後はすぐラックへ歩くので、ロックアウト後に静止区間が無いことが多い）。
+    ロックアウトは次のレップの下降の始まりより前で探す（回と回の間が短いセット。solve_lockout、2026-11-06）。
     rep_windows（動画のレップ区間を IMU の時刻に直したもの）があればその区間でレップを取り、
     無ければ IMU だけで数える。時刻は M5 の時計（imu_on_device_clock）。
     戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "rep_source", "n_still"（静止区間の数）}
@@ -400,12 +408,13 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
         rep_source = "imu"
     v = v.copy()
     peaks, prev_T = [], None
-    for ds, dmin, pk in rep_idx:
+    for k, (ds, dmin, pk) in enumerate(rep_idx):
         before = [c for c in anchors if c <= ds]
         a0 = before[-1] if before else ds
         if prev_T is not None and prev_T > a0:
             a0 = prev_T
-        T, vc = solve_lockout(v_raw, a0, pk, fs, dt_med)
+        nxt = rep_idx[k + 1][0] if k + 1 < len(rep_idx) else None   # 次のレップの下降の始まり（最後のレップは無し）
+        T, vc = solve_lockout(v_raw, a0, pk, fs, dt_med, limit=nxt)
         v[a0:T + 1] = vc
         prev_T = T
         p_new = int(dmin + np.argmax(v[dmin:T + 1]))

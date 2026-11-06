@@ -279,6 +279,56 @@ def test_imu_single_rep_has_no_velocity_loss():
     assert f["imu_velocity_loss_mcv_pct"] is None
 
 
+def make_imu_short_rest(seed, rest=0.5, n_reps=8, fs=100.0, depth=0.45, descent=1.0, pause=0.1,
+                        ascent0=0.7, growth=0.05, sway=0.03, lead=3.0, tail=2.0):
+    """
+    回と回の間が短いセットの IMU（立ち上がって rest 秒で次の回へ）。バーはしゃがむ途中で前後に sway [m] 動く。
+    鉛直加速度は 3 軸の合成の大きさから出すので、横の加速度が小さな誤差になり、立位で「変位 0」がぴったりにはならない（実データと同じ）。
+    戻り値: IMU, 各レップの区間 [(始まり, 底, 終わり) [s]]（動画のレップ区間を IMU の時刻に直したものに当たる）, 上昇時間, 深さ [m]
+    """
+    segs, windows, ascents, t0 = [np.zeros(int(lead * fs))], [], [], lead
+    for i in range(n_reps):
+        n_d, n_p, n_a, n_r = (int(x * fs) for x in (descent, pause, ascent0 * (1 + growth * i), rest))
+        td = np.linspace(0, np.pi, n_d, endpoint=False)
+        ta = np.linspace(0, np.pi, n_a, endpoint=False)
+        segs += [depth * (1 - np.cos(td)) / 2, np.full(n_p, depth), depth * (1 + np.cos(ta)) / 2, np.zeros(n_r)]
+        windows.append((t0, t0 + (n_d + n_p / 2) / fs, t0 + (n_d + n_p + n_a) / fs))
+        ascents.append(n_a / fs)
+        t0 += (n_d + n_p + n_a + n_r) / fs
+    y = np.concatenate(segs + [np.zeros(int(tail * fs))])          # 立位からの下がり量 [m]
+    t = np.arange(len(y)) / fs
+    a_true = np.gradient(np.gradient(-y, 1 / fs), 1 / fs)
+    x_h = sway * np.sin(np.pi * np.clip(y / depth, 0, 1)) ** 2     # 前後の動き（立位と底で 0、途中で sway）
+    a_h = np.gradient(np.gradient(x_h, 1 / fs), 1 / fs)
+    rng = np.random.default_rng(seed)
+    imu = pd.DataFrame({
+        "timestamp_ms": t * 1000.0,
+        "ax_g": a_h / G + rng.normal(0, 0.01, len(t)), "ay_g": rng.normal(0, 0.01, len(t)),
+        "az_g": 1.05 + a_true / G + rng.normal(0, 0.01, len(t)),
+        "gx_dps": -3.8 + rng.normal(0, 1, len(t)), "gy_dps": -12.9 + rng.normal(0, 1, len(t)),
+        "gz_dps": 16.0 + rng.normal(0, 1, len(t)),
+    })
+    return imu, windows, ascents, depth
+
+
+@pytest.mark.parametrize("use_video_windows", [True, False])
+def test_imu_mcv_stays_right_when_rest_between_reps_is_short(use_video_windows):
+    """
+    回と回の間が 0.5 秒のセットでも、どのレップの MCV も真値に近い（動画の区切りを使うときも、IMU だけで数えるときも）。
+    ロックアウト（速度 0・変位 0 とみなす時刻）を上昇ピークの後 2.5 秒の中だけで探していたころは、次のレップのしゃがみの中に取り違え、
+    そのレップと次のレップの速度が崩れていた（2026-11-06。11/6 の 80 kg×8 で IMU の 4 回目が 0.083 m/s、動画は 0.545 m/s）。
+    種によって起きたり起きなかったりするので、10 通り回す。
+    """
+    for seed in range(10):
+        imu, windows, asc, depth = make_imu_short_rest(seed)
+        f = ef.compute_imu_features(imu, expected_reps=len(asc), rep_windows=windows if use_video_windows else None)
+        assert f["imu_n_reps_detected"] == len(asc), f"種 {seed}"
+        for i, (r, a) in enumerate(zip(f["_imu_reps"], asc)):
+            true_mcv = depth / a
+            assert abs(r["mcv"] - true_mcv) / true_mcv < 0.15, \
+                f"種 {seed} の {i + 1} 回目: MCV {r['mcv']:.3f} m/s（真値 {true_mcv:.3f}）"
+
+
 # ---------------------------------------------------------------------------
 # 協力者のラベル
 # ---------------------------------------------------------------------------
