@@ -602,6 +602,29 @@ def test_quality_marks_unusable_data():
     assert exclusion_reasons(vid) == {"imu": [], "video": []}
 
 
+def test_collection_summary_counts_usable_sets():
+    """集まり具合は学習に使えるセットで数える。要確認が付いただけのセット（学習には使う）を数から落とさない"""
+    import run_pipeline as rp
+    ok = {"subject_id": "S001", "session_id": "SES001", "rpe": 6, "weight_kg": 90, "reps_completed": 8,
+          "modality": "imu+video", "pose_available": True, "pose_n_reps_detected": 8, "pose_first_rep_mcv_bl": 0.4,
+          "pose_ankle_y_max_norm": 0.8, "pose_shoulder_width_bl": 0.25, "pose_nan_ratio": 0.0,
+          "pose_key_visibility_mean": 0.99, "pose_velocity_loss_pct": 20.0,
+          "imu_n_samples": 6000, "imu_fs_hz": 100.0, "imu_az_median_g": 1.04,
+          "imu_n_reps_detected": 8, "imu_first_rep_mcv_mps": 0.5, "imu_velocity_loss_mcv_pct": 22.0}
+    rows = [ok | {"set_no": 1},
+            ok | {"set_no": 2, "rpe": 8, "pose_other_person_frames": 8},     # 人が横切った: 要確認だけ（学習に使う）
+            ok | {"set_no": 3, "rpe": 8, "imu_n_reps_detected": 7},          # IMU だけ外れる
+            ok | {"set_no": 4, "rpe": 9, "pose_ankle_y_max_norm": 1.0}]      # 動画だけ外れる
+    vid = ({k: v for k, v in ok.items() if not k.startswith("imu_")}
+           | {"subject_id": "S003", "modality": "video", "set_no": 1, "rpe": 7})   # 動画だけの協力者
+    df = pd.DataFrame(rows + [vid])
+    df["excluded_from"] = [rp.excluded_from(r) for r in df.to_dict("records")]
+    s = {x["subject_id"]: x for x in rp.collection_summary(df)}
+    assert (s["S001"]["trials"], s["S001"]["video"], s["S001"]["imu"]) == (4, 3, 3)
+    assert s["S001"]["rpe_dist"] == {6.0: 1, 8.0: 2}        # 動画が使える 3 セットの RPE
+    assert (s["S003"]["video"], s["S003"]["imu"]) == (1, None)
+
+
 def test_train_excludes_unusable_sets(tmp_path):
     """データが欠けているセットは、そのデータ（IMU / 動画）を使う条件の学習・テストから外す"""
     df = synthetic_features(seed=2)

@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from quality_checks import check_set
+from quality_checks import check_set, has_imu
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -64,6 +64,25 @@ def excluded_from(row) -> str:
     """学習から外すデータ: "IMU" / "動画" / "IMU・動画" / ""（どちらも使える）"""
     parts = {i.part for i in check_set(row) if i.exclude}
     return "・".join(name for part, name in (("imu", "IMU"), ("video", "動画")) if part in parts)
+
+
+def collection_summary(df) -> list:
+    """被験者ごとのデータの集まり具合を、学習に使えるセットで数える（df には excluded_from の列が要る）。
+    要確認が付いただけのセットは学習に使うので数に入れる（2026-11-10 修正。それまでは要確認が 1 つも
+    付いていないセットだけを数えていて、学習に使える数より少なく出ていた）。RPE が未入力のセットは数えない。
+    戻り値: [{subject_id, sessions, trials, video, imu（IMU の無い人は None）, rpe_dist（動画が使えるセットの RPE）}, ...]"""
+    out = []
+    for sid, g in df.groupby("subject_id"):
+        labeled = g["rpe"].notna()
+        ex = g["excluded_from"].fillna("").astype(str)
+        with_imu = pd.Series([has_imu(r) for r in g.to_dict("records")], index=g.index)
+        video_ok = labeled & ~ex.str.contains("動画")
+        imu_ok = labeled & with_imu & ~ex.str.contains("IMU")
+        dist = g.loc[video_ok, "rpe"].value_counts().sort_index()
+        out.append({"subject_id": sid, "sessions": int(g["session_id"].nunique()), "trials": int(len(g)),
+                    "video": int(video_ok.sum()), "imu": int(imu_ok.sum()) if with_imu.any() else None,
+                    "rpe_dist": {float(k): int(v) for k, v in dist.items()}})
+    return out
 
 
 def quality_report(subject=None):
@@ -97,16 +116,17 @@ def quality_report(subject=None):
             ex = f"　→ 学習から除外: {r['excluded_from']}" if r["excluded_from"] else ""
             print(f"      set{int(r['set_no']):02d}: {r['issues']}{ex}")
 
-    # データの集まり具合
-    print(f"\n{'=' * 64}\n データの集まり具合（目安: 1人 {TARGET_TRIALS_PER_SUBJECT} 試技、RPE 6〜10 が満遍なく）\n{'=' * 64}")
-    ok = df[df["issues"] == ""]
-    for sid, g in df.groupby("subject_id"):
-        good = ok[ok["subject_id"] == sid]
-        dist = good["rpe"].value_counts().sort_index()
-        dist_txt = "  ".join(f"{k:g}:{v}" for k, v in dist.items())
-        print(f"  {sid}: セッション {g['session_id'].nunique()}  試技 {len(g)}（問題なし {len(good)}"
-              f" / 目安まで あと {max(0, TARGET_TRIALS_PER_SUBJECT - len(good))}）  RPE分布 {dist_txt}")
-    print(f"  合計: 被験者 {df['subject_id'].nunique()} 人、試技 {len(df)}（問題なし {len(ok)}）")
+    # データの集まり具合（学習に使えるセットで数える。要確認が付いただけのセットは学習に使う）
+    print(f"\n{'=' * 64}\n データの集まり具合（目安: 1人 {TARGET_TRIALS_PER_SUBJECT} 試技、RPE 6〜10 が満遍なく。"
+          f"学習に使えるセットで数える）\n{'=' * 64}")
+    for s in collection_summary(df):
+        usable = f"動画 {s['video']}" + (f"・IMU {s['imu']}" if s["imu"] is not None else "")
+        dist_txt = "  ".join(f"{k:g}:{v}" for k, v in s["rpe_dist"].items())
+        print(f"  {s['subject_id']}: セッション {s['sessions']}  試技 {s['trials']}（学習に使える: {usable}"
+              f" / 目安まで あと {max(0, TARGET_TRIALS_PER_SUBJECT - s['video'])}）  RPE分布 {dist_txt}")
+    n_flag = int((df["issues"] != "").sum())
+    print(f"  合計: 被験者 {df['subject_id'].nunique()} 人、試技 {len(df)}"
+          f"（要確認の付いたセット {n_flag}。「学習から除外」と出ていなければ学習に使う）")
     n_imu = int(df["excluded_from"].str.contains("IMU").sum())
     n_vid = int(df["excluded_from"].str.contains("動画").sum())
     if n_imu or n_vid:
