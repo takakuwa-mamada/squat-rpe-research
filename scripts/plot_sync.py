@@ -159,7 +159,8 @@ def main():
             print(f"  [SKIP] {key}: 動画の大きさか身長がありません")
             continue
         out_png = OUT_DIR / f"{key[0]}_{key[1]}_set{set_no:02d}.png"
-        r = plot_one(key, feat, pd.read_csv(kp_csv), w, h, fps, pd.read_csv(imu_csv), prof["height_cm"],
+        imu_df, _ = ef.read_imu(imu_csv, ef.data_root_of(meta_json))    # 特徴量と同じ読み方（校正があれば当てはめる）
+        r = plot_one(key, feat, pd.read_csv(kp_csv), w, h, fps, imu_df, prof["height_cm"],
                      feat.get("reps_completed"), out_png)
         if r is None:
             print(f"  [SKIP] {key}: 波形を重ねられません")

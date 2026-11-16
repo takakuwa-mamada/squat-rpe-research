@@ -17,6 +17,7 @@
 
  1 セットの処理:
    1. IMU を markers.csv の SPACE〜SPACE（前後 0.3 s）で切り出す（split_session.py と同じ）
+      加速度センサの校正（data/_calib/calibration_BAR.json。calibrate_imu.py --apply）があれば、先に当てはめる
    2. プレートを追う（bar_path_extract.py: Hough 円で自動検出 → CSRT 追跡＋Hough 補正）→ session_…/plate/
       物差し: Hough で測ったプレートの半径の中央値 × 2 = プレートの直径（--plate-diameter、既定 450 mm）
       位置は肩の点と同じ前処理（0.3 s 以下の見失いだけ直線でつなぎ、6 Hz のローパス: extract_features._fill_smooth）
@@ -256,6 +257,10 @@ def compare_session(folder: Path, plate_mm=PLATE_DIAMETER_MM, force=False, resel
         return [], []
     if len(videos) != len(markers):
         print(f"  [注意] 動画 {len(videos)} 本とセット {len(markers)} の数が合いません。先頭から順に割り当てます")
+    # 加速度センサの校正（data/_side/session_… の 2 つ上 = data/ の _calib。あれば）を、前の動画との比較と同じく当てはめる
+    calib = ef.load_calibration(folder.resolve().parents[1], dev)
+    raw = ef.apply_calibration(raw, calib)
+    print(f"  IMU の校正: {'当てはめた（' + Path(calib['path']).name + '）' if calib else 'なし'}")
 
     date = session_date(folder)
     all_rows, infos = [], []
@@ -264,7 +269,8 @@ def compare_session(folder: Path, plate_mm=PLATE_DIAMETER_MM, force=False, resel
         expected = _int_or_none(m.get("reps"))
         base = {"subject_id": SUBJECT, "session_id": folder.name, "set_no": set_no, "date": date,
                 "weight_kg": m.get("weight_kg"), "rpe": m.get("rpe")}
-        info = {"session_id": folder.name, "set_no": set_no, "video": video.name, "reps_planned": expected}
+        info = {"session_id": folder.name, "set_no": set_no, "video": video.name, "reps_planned": expected,
+                "imu_calibrated": calib is not None}
         print(f"  set{set_no:02d} ← {video.name}")
         tracked = track_plate(video, folder / "plate", plate_mm, force=force, reselect=reselect, allow_gui=allow_gui)
         if tracked is None:
@@ -370,7 +376,7 @@ def main():
     reps = reps[lead + [c for c in reps.columns if c not in lead]]
     summ = cvi.summarize(reps)
     info_cols = ["session_id", "set_no", "video", "reps_planned", "n_reps_detected", "n_lost_skipped",
-                 "sync_offset_s", "mm_per_px", "scale_source", "tracked_ratio"]
+                 "sync_offset_s", "mm_per_px", "scale_source", "tracked_ratio", "imu_calibrated"]
     info_df = pd.DataFrame(all_info)
     sets = cvi.per_set(reps).merge(info_df[[c for c in info_cols if c in info_df.columns]],
                                    on=["session_id", "set_no"], how="left")

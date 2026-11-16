@@ -5,7 +5,8 @@
 
  時刻合わせ（extract_features.sync_video_imu）が合ったセットで、動画のレップ i と IMU のレップ i を
  同じ時間軸に置き、両方の速度の波形に「同じ定義」を当てて比べる。
-   上昇区間 : 底より後で、速度がピークの 5 %（最低 0.02 m/s）を超えて続く区間（extract_features と同じ）
+   上昇区間 : 底のあとで速度が初めてピークの 5 %（最低 0.02 m/s）を超えた所から、ピークのあとでそれを
+              下回る直前まで（extract_features.concentric_phase と同じ。上がる途中で速度が落ちても底から数える。2026-11-12）
    MCV      : 上昇区間の平均速度 [m/s]
    ピーク   : 上昇区間の最大速度 [m/s]
    上昇の変位: 上昇区間の終わりの位置 − 始まりの位置 [cm]（MCV ≒ 上昇の変位 / 上昇時間）
@@ -13,6 +14,7 @@
               （1 フレームのキーポイントの跳びに引きずられないよう、最大・最小は使わない）
  動画の速度・位置は 肩の上下 [px] → m（身長 × 0.779 = 立位の肩〜足首、を体の大きさ BL [px] で割った倍率）。
  IMU は extract_features と同じ速度（レップごとにロックアウトで速度 0・変位 0 に補正）を使い、位置はその積分。
+ 加速度センサの校正（data/_calib/calibration_BAR.json。calibrate_imu.py --apply）があれば、特徴量と同じく当てはめる。
  特徴量 JSON の値（_imu_reps / _pose_reps）は区間の決め方が両者で少し違うので、比較には使わず参考列として残す。
 
  対象: features_all.csv のうち、imu_rep_source = video（時刻合わせが合った）で、
@@ -59,7 +61,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent if (SCRIPT_DIR.parent / "data").is_dir() else S
 FEATURES_CSV = PROJECT_ROOT / "outputs" / "features_all.csv"
 OUT_DIR = PROJECT_ROOT / "outputs"
 
-ASC_FRAC = 0.05      # 上昇区間: 速度がピークのこの割合を超えている間（extract_features.concentric_phase と同じ）
+ASC_FRAC = 0.05      # 上昇区間のしきい値: ピークの速度のこの割合（extract_features.concentric_phase と同じ）
 ASC_MIN = 0.02       # 〃 の下限 [m/s]
 STAND_PRE_S = 0.3    # 深さの基準（立位）: レップの始まりの直前この秒数の位置の中央値
 WIN_POST_S = 0.8     # 上昇の終わりを探す余裕: レップの終わりのこの秒数後まで
@@ -130,6 +132,9 @@ def rep_metrics(t, z, v, ts, te):
     """
     1 レップ（区間 [ts, te]、その波形の時刻）の上昇時間・MCV・ピーク・深さ。動画にも IMU にも同じ定義で当てる。
     区間が波形の外なら None。
+    上がり始めは、底 b のあとで速度が初めてしきい値を超えた所（2026-11-12 修正）。以前はピークからさかのぼって
+    決めていたので、上がる途中で速度がしきい値まで落ちると、そこより前が切れていた（11/10 set03 の 4 回目の IMU:
+    上昇時間 0.93 秒、動画 1.97 秒）。
     """
     n = len(t)
     lo, hi = int(np.searchsorted(t, ts - STAND_PRE_S)), int(np.searchsorted(t, te + WIN_POST_S))
@@ -143,9 +148,9 @@ def rep_metrics(t, z, v, ts, te):
         return None
     p = b + int(np.nanargmax(v[b:hp]))                          # 上昇のピーク（レップの中）
     thr = max(ASC_MIN, ASC_FRAC * float(v[p]))
-    s, e = p, p
-    while s > b and v[s - 1] > thr:
-        s -= 1
+    s, e = b, p
+    while s < p and not v[s] > thr:
+        s += 1
     while e < hi - 1 and v[e + 1] > thr:
         e += 1
     stand = float(np.nanmedian(z[lo:i_s + 1]))
@@ -330,7 +335,7 @@ def main():
 
     trials = {(m.parent.parent.name, m.parent.name, s): (imu, kp, vid, m, out)
               for imu, kp, vid, m, s, out in ef.find_trials(filter_subject=args.subject)}
-    all_rows = []
+    all_rows, n_calib, stale = [], 0, []
     for row in use.to_dict("records"):
         key = (row["subject_id"], row["session_id"], int(row["set_no"]))
         if key not in trials:
@@ -343,7 +348,12 @@ def main():
             print(f"  [SKIP] {key}: subjects.json に身長がありません")
             continue
         w, h, fps = ef.load_video_info(kp_csv, video)
-        rows = compare_set(feat, pd.read_csv(kp_csv), w, h, fps, pd.read_csv(imu_csv),
+        # IMU は特徴量と同じ読み方（解析に使う校正があれば当てはめる）
+        imu_df, calib = ef.read_imu(imu_csv, ef.data_root_of(meta_json))
+        n_calib += calib is not None
+        if bool(feat.get("imu_calibrated")) != (calib is not None):
+            stale.append(key)
+        rows = compare_set(feat, pd.read_csv(kp_csv), w, h, fps, imu_df,
                            prof["height_cm"], expected_reps=row.get("reps_completed"))
         for r in rows:
             r.update({"subject_id": key[0], "session_id": key[1], "set_no": key[2], "date": row.get("date"),
@@ -354,6 +364,10 @@ def main():
 
     if not all_rows:
         sys.exit("[ERROR] 比べられるレップがありません")
+    print(f"[IMU の校正] {'当てはめた' if n_calib else 'なし'}（{n_calib} セット。data\\_calib\\calibration_<デバイス>.json）")
+    if stale:
+        print(f"[注意] {len(stale)} セットは、特徴量を作ったときと IMU の校正の有無が違います（校正を保存・移動したあと"
+              "作り直していない）。python scripts\\run_pipeline.py --no-split --force-features で作り直してください")
     lead = ["subject_id", "session_id", "set_no", "rep", "date", "weight_kg", "rpe"]
     reps = pd.DataFrame(all_rows)
     reps = reps[lead + [c for c in reps.columns if c not in lead]]

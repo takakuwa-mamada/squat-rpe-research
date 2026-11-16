@@ -9,6 +9,8 @@
                 data/<S>/<SES>/pose/setNN_yolo_info.json    （動画の縦横サイズ。無ければ動画から読む）
    - meta.json: data/<S>/<SES>/meta.json
    - 被験者情報: data/subjects.json（身長・1RM。あれば %1RM と m/s 換算に使う）
+   - IMU の校正: data/_calib/calibration_BAR.json（calibrate_imu.py --apply が保存する。あれば IMU の加速度に
+                当てはめてから速度を計算し、imu_calibrated = true と書く。無ければ当てはめない）
 
  出力:
    - data/<S>/<SES>/features/setNN_features.json（1試技ぶんの特徴量）
@@ -314,18 +316,31 @@ def solve_lockout(v_raw, a0, pk, fs, dt, limit=None):
     return T, vc
 
 
-def concentric_phase(v, a, p):
+def concentric_phase(v, a, p, b=None):
     """
     レップの上昇ピーク p を含むコンセントリック区間 [s, e] と、推進局面の終わり pe を返す。
-      s, e : 速度がピークの 5%（最低 0.02 m/s）を超えて続く区間の両端
-             （0 を境にすると、残ったわずかなずれで静止中まで上昇に数えてしまう）
-      pe   : ピーク以降で加速度が −g を下回る直前（MPV の定義: 減速が重力より大きい局面を除く）
+    しきい値 = ピークの 5%（最低 0.02 m/s）。0 を境にすると、残ったわずかなずれで静止中まで上昇に数えてしまう。
+      s  : 底 b（いちばん低い位置）のあとで、速度が初めてしきい値を超えた所。
+           b が無いときは、ピークからさかのぼってしきい値を超えて続く区間の始まり（以前の決め方）
+      e  : ピークのあと、しきい値を超えて続く区間の終わり
+      pe : ピーク以降で加速度が −g を下回る直前（MPV の定義: 減速が重力より大きい局面を除く）
+    2026-11-12 修正: 以前は s もピークからさかのぼって決めていたので、上がる途中で速度がしきい値まで落ちると、
+    落ちた所より前が上昇から切れていた（11/10 set03 の 4 回目: 上がる途中でバーの端の IMU の速度が
+    0.25 秒ほど −0.05 m/s まで落ち、上昇時間 0.93 秒・MCV 0.360。動画は 1.97 秒・0.306。
+    落ちた原因は分かっていない: バーが左右に揺れたためかどうかは確かめられていない）。
+    残っている弱点（未修正）: e は今もピークから先へたどって決める。速度のピークが上昇の前半にあり、その後で
+    止まりかけるレップでは、止まりかけた所を上がり終わりと数えてしまう（きついセットで起こりうる）。
     """
     n = len(v)
     thr = max(0.02, 0.05 * float(v[p]))
-    s = p
-    while s > 0 and v[s - 1] > thr:
-        s -= 1
+    if b is not None and 0 <= b <= p:
+        s = int(b)
+        while s < p and not v[s] > thr:
+            s += 1
+    else:
+        s = p
+        while s > 0 and v[s - 1] > thr:
+            s -= 1
     e = p
     while e < n - 1 and v[e + 1] > thr:
         e += 1
@@ -370,6 +385,72 @@ def imu_on_device_clock(imu_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 加速度センサの校正（calibrate_imu.py。2026-11-16）
+#   data/_calib/calibration_<デバイス>.json（calibrate_imu.py --apply が保存する）があれば、IMU を読むときに
+#   本当の加速度 = (読み − ゼロ点のずれ) / 感度 を軸ごとに当てはめてから、速度を計算する。無ければ何もしない
+#   （校正を入れる前と同じ計算）。当てはめるのは読み込んだ表だけで、元の CSV（imu/setNN_*.csv・raw_*.csv）は書き換えない。
+#   当てはめる前は静止で 1.04〜1.05 g と出ていた（主に z のゼロ点のずれ +0.049 g。感度のずれは 0.2〜0.4 %）。
+#   当てはめると静止時の値は 1.00 g 前後になる（S001 の 26 セットで 0.992〜1.002 g）。校正から計算した速度の倍率の違いは
+#   0.2 % だが、実際のレップごとの MCV は平均 +0.6 %・SD 2.8 % 動いた（146 レップ。レップごとのドリフトの解き直しが
+#   入力のわずかな違いに敏感なため）。動画との差のばらつきは 0.0179 → 0.0164 m/s と少し小さくなった（参考値）。
+# ---------------------------------------------------------------------------
+CALIB_DIR = "_calib"
+ACC_COLS = ["ax_g", "ay_g", "az_g"]
+
+
+def data_root_of(meta_json) -> Path:
+    """meta.json（data/<被験者>/<セッション>/meta.json）から data/ の場所（校正のファイルを探す場所）"""
+    p = Path(meta_json).resolve()
+    return p.parents[2] if len(p.parents) > 2 else p.parent
+
+
+def imu_device_of(imu_csv) -> str:
+    """IMU の CSV の名前（set01_BAR.csv・raw_BAR.csv）からデバイス名（BAR）"""
+    return Path(imu_csv).stem.split("_", 1)[-1]
+
+
+def load_calibration(data_root, device: str) -> Optional[dict]:
+    """
+    解析に使う校正: <data_root>/_calib/calibration_<デバイス>.json。無ければ None（当てはめない）。
+    ファイルはあるのに値が読めない・足りないときは止める（黙って当てはめずに進むと、気づかないまま数字が変わる）。
+    戻り値: {"offset_g": [x, y, z], "sensitivity": [x, y, z], "sources": 元にした校正の記録, "path": ファイルの場所}
+    """
+    path = Path(data_root) / CALIB_DIR / f"calibration_{device}.json"
+    if not path.exists():
+        return None
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        offset = [float(x) for x in d["offset_g"]]
+        sens = [float(x) for x in d["sensitivity"]]
+        if len(offset) != 3 or len(sens) != 3 or not all(0.5 < s < 2.0 for s in sens):
+            raise ValueError("offset_g・sensitivity は 3 軸ぶん、感度は 1 前後の値")
+    except Exception as e:
+        raise ValueError(f"校正のファイルが読めません: {path}（{e}）。python scripts\\calibrate_imu.py --apply で作り直すか、"
+                         f"data\\{CALIB_DIR}\\_archive\\ へ移してください") from e
+    return {"offset_g": offset, "sensitivity": sens, "sources": d.get("sources"), "path": str(path)}
+
+
+def apply_calibration(imu_df: pd.DataFrame, calib: Optional[dict]) -> pd.DataFrame:
+    """
+    加速度の 3 軸に校正を当てはめた表を返す: 本当の加速度 = (読み − ゼロ点のずれ) / 感度（軸ごと。単位 g）。
+    ジャイロ・時刻と、元の表は変えない。calib が None なら表をそのまま返す。
+    同じ表に 2 回当てはめないこと（CSV を読んだ直後に 1 回だけ: read_imu）
+    """
+    if not calib:
+        return imu_df
+    out = imu_df.copy()
+    for c, b, s in zip(ACC_COLS, calib["offset_g"], calib["sensitivity"]):
+        out[c] = (imu_df[c].to_numpy(dtype=float) - float(b)) / float(s)
+    return out
+
+
+def read_imu(imu_csv, data_root):
+    """IMU の CSV を読み、解析に使う校正（あれば）を当てはめる。戻り値: (表, 使った校正 か None)"""
+    calib = load_calibration(data_root, imu_device_of(imu_csv))
+    return apply_calibration(pd.read_csv(imu_csv), calib), calib
+
+
 def imu_recv_rate_hz(imu_df: pd.DataFrame) -> float:
     """受信レート [Hz] = 受け取ったサンプル数 / M5 の時計での長さ（送信の欠けがあると 100 Hz より下がる）"""
     if "boot_ms" in imu_df.columns and len(imu_df) >= 2:
@@ -390,7 +471,9 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
     ロックアウトは次のレップの下降の始まりより前で探す（回と回の間が短いセット。solve_lockout、2026-11-06）。
     rep_windows（動画のレップ区間を IMU の時刻に直したもの）があればその区間でレップを取り、
     無ければ IMU だけで数える。時刻は M5 の時計（imu_on_device_clock）。
-    戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "rep_source", "n_still"（静止区間の数）}
+    底（bottoms）は、下降の速度のピークから上昇のピークまでで位置がいちばん低い所（上昇は底から数える。2026-11-12）。
+    速度ではなく位置で探すので、上がる途中で速度が 0 を下回っても、そこを底と取り違えない。
+    戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "bottoms", "rep_source", "n_still"（静止区間の数）}
     """
     imu_df = imu_on_device_clock(imu_df)
     t = imu_df["timestamp_ms"].to_numpy() / 1000.0   # [s]
@@ -407,7 +490,7 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
         rep_idx = select_reps(v_hp, fs, dt_med, expected_reps=expected_reps)
         rep_source = "imu"
     v = v.copy()
-    peaks, prev_T = [], None
+    peaks, bottoms, prev_T = [], [], None
     for k, (ds, dmin, pk) in enumerate(rep_idx):
         before = [c for c in anchors if c <= ds]
         a0 = before[-1] if before else ds
@@ -422,8 +505,10 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
         if peaks and p_new <= peaks[-1]:
             continue
         peaks.append(p_new)
+        bottoms.append(int(dmin + np.argmin(np.cumsum(v[dmin:p_new + 1]))))   # 位置がいちばん低い所
     return {"t": t, "fs": fs, "dt": dt_med, "a": az_dyn_lp, "v": v, "g_ref": g_ref,
-            "peaks": np.array(peaks, dtype=int), "rep_source": rep_source, "n_still": len(anchors)}
+            "peaks": np.array(peaks, dtype=int), "bottoms": np.array(bottoms, dtype=int),
+            "rep_source": rep_source, "n_still": len(anchors)}
 
 
 def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None) -> dict:
@@ -473,8 +558,8 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=N
 
     # レップごとの指標（ピーク速度・MCV・MPV・コンセントリック時間）
     reps = []
-    for p in peaks:
-        s, e, pe = concentric_phase(v, az_dyn_lp, int(p))
+    for p, b in zip(peaks, m["bottoms"]):
+        s, e, pe = concentric_phase(v, az_dyn_lp, int(p), int(b))
         reps.append({
             "peak_t_s": float(t[p]),
             "start_t_s": float(t[s]),
@@ -1166,7 +1251,8 @@ def extract_one_trial(imu_csv: Optional[Path], kp_csv: Optional[Path],
     # IMU（あれば）: 動画の回数が申告どおりで、時刻が合えば、動画のレップ区間で IMU のレップを取る
     imu_feat = {}
     if imu_csv is not None and imu_csv.exists():
-        imu_df = pd.read_csv(imu_csv)
+        # 解析に使う校正（data/_calib。あれば）を当てはめてから、時刻合わせ・速度の計算に渡す
+        imu_df, calib = read_imu(imu_csv, data_root_of(meta_json))
         sync, windows = {}, None
         pose_reps = pose_feat.get("_pose_reps") or []
         if pose_feat.get("pose_available") and pose_reps and (not expected_reps or len(pose_reps) == expected_reps):
@@ -1177,6 +1263,10 @@ def extract_one_trial(imu_csv: Optional[Path], kp_csv: Optional[Path],
                 windows = [(r["start_t_s"] + off, r["bottom_t_s"] + off, r["end_t_s"] + off) for r in pose_reps]
         imu_feat = compute_imu_features(imu_df, expected_reps=expected_reps, rep_windows=windows)
         imu_feat.update(sync)
+        # 校正を当てはめたか（当てはめると imu_gravity_ref_g は 1.00 g 前後、当てはめないと 1.04〜1.05 g）と、使った値
+        imu_feat["imu_calibrated"] = calib is not None
+        imu_feat["_imu_calibration"] = ({k: calib[k] for k in ("offset_g", "sensitivity", "sources")}
+                                        if calib else None)
 
     weight = set_meta.get("weight_kg")
     one_rm = profile.get("squat_1rm_kg")

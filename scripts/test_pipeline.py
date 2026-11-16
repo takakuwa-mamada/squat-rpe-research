@@ -272,6 +272,77 @@ def test_imu_double_hump_ascent_counts_each_rep_once():
     assert min(np.diff(peaks)) > 2.5                       # 3つとも別のレップ（間隔 ≒ 5.1 s）
 
 
+def sticking_stop_trajectory(fs=100.0, n_reps=3, depth=0.55, descent=1.0, ascent=2.0, rest=2.5, lead=20.0):
+    """
+    上がる途中で一度止まり、少し下がってから上がりきるレップ（速度が最も遅い所 −0.06 m/s、0 未満が 0.24 秒）。
+    11/10 set03 の 4 回目（RPE 8）では、上がる途中でバーの端の IMU の速度が 0.25 秒ほど −0.05 m/s まで落ちた
+    （原因は分かっていない: バーが左右に揺れたためかどうかは確かめられていない）。
+    戻り値: t, y（立位からの下がり量 [m]、下が正）, 各レップの区間 [(始まり, 底, 終わり) [s]], 底からの上がり量 [m]
+    """
+    s = np.linspace(0, 1, int(ascent * fs), endpoint=False)
+    v_shape = (0.9 * np.exp(-((s - 0.18) / 0.09) ** 2)       # 切り返し直後の山
+               - 0.06 * np.exp(-((s - 0.42) / 0.06) ** 2)    # 止まって少し下がる
+               + 1.0 * np.exp(-((s - 0.72) / 0.13) ** 2))    # 上がりきる
+    v_shape *= np.sin(np.pi * s)                             # 始まりと終わりは速度 0
+    up = np.cumsum(v_shape)
+    up = depth * up / up[-1]                                 # 0 → depth まで上がる
+    td = np.linspace(0, np.pi, int(descent * fs), endpoint=False)
+    segs, windows, t0 = [np.zeros(int(lead * fs))], [], lead
+    for _ in range(n_reps):
+        segs += [depth * (1 - np.cos(td)) / 2, np.full(int(0.1 * fs), depth), depth - up, np.zeros(int(rest * fs))]
+        windows.append((t0, t0 + descent + 0.05, t0 + descent + 0.1 + ascent))
+        t0 += descent + 0.1 + ascent + rest
+    y = np.concatenate(segs + [np.zeros(int(3.0 * fs))])
+    return np.arange(len(y)) / fs, y, windows, up
+
+
+def true_rise(up, fs):
+    """合成の上昇の真の上昇時間 [s] と MCV [m/s]: 底のあと初めてピークの 5 % を超えてから、最後に超えている所まで"""
+    vt = np.gradient(up) * fs
+    above = np.where(vt > 0.05 * vt.max())[0]
+    return (above[-1] - above[0]) / fs, float(vt[above[0]:above[-1] + 1].mean())
+
+
+def test_imu_rise_counts_from_bottom_through_mid_rise_stop():
+    """
+    上がる途中で速度が 0 を下回っても、上昇は底から数える（2026-11-12 修正）。
+    それまでは「速度のピークからさかのぼって、しきい値以下になった所」を上がり始めにしていたので、
+    止まった所より前が切れていた（11/10 set03 の 4 回目: IMU の上昇時間 0.93 秒、動画 1.97 秒）。
+    この合成データでは、真の 1.67 秒・0.325 m/s に対して 0.8 秒・0.47 m/s と出ていた。
+    """
+    fs = 100.0
+    t, y, windows, up = sticking_stop_trajectory(fs)
+    true_s, true_mcv = true_rise(up, fs)
+    a_true = np.gradient(np.gradient(-y, 1 / fs), 1 / fs)
+    rng = np.random.default_rng(3)
+    imu = pd.DataFrame({
+        "timestamp_ms": t * 1000.0,
+        "ax_g": rng.normal(0, 0.01, len(t)), "ay_g": rng.normal(0, 0.01, len(t)),
+        "az_g": 1.05 + a_true / G + rng.normal(0, 0.01, len(t)),
+        "gx_dps": -3.8 + rng.normal(0, 1, len(t)), "gy_dps": -12.9 + rng.normal(0, 1, len(t)),
+        "gz_dps": 16.0 + rng.normal(0, 1, len(t)),
+    })
+    f = ef.compute_imu_features(imu, expected_reps=3, rep_windows=windows)
+    assert f["imu_n_reps_detected"] == 3
+    for r in f["_imu_reps"]:
+        assert abs(r["concentric_s"] - true_s) < 0.15
+        assert abs(r["mcv"] - true_mcv) / true_mcv < 0.1
+
+
+def test_compare_rep_metrics_counts_rise_from_bottom_through_mid_rise_stop():
+    """動画と IMU の比較（compare_video_imu.rep_metrics。横からの比較も使う）も、上昇は底から数える（2026-11-12 修正）"""
+    import compare_video_imu as cv
+    fs = 100.0
+    t, y, windows, up = sticking_stop_trajectory(fs)
+    true_s, true_mcv = true_rise(up, fs)
+    z = -y                                                   # 上が正
+    v = np.gradient(z) * fs
+    for ts, _, te in windows:
+        m = cv.rep_metrics(t, z, v, ts, te)
+        assert abs(m["ascent_s"] - true_s) < 0.05
+        assert abs(m["mcv"] - true_mcv) / true_mcv < 0.03
+
+
 def test_imu_single_rep_has_no_velocity_loss():
     imu, _, _ = make_imu(n_reps=1)
     f = ef.compute_imu_features(imu, expected_reps=1)
@@ -987,3 +1058,328 @@ def test_side_judgement_against_front_ratio():
     assert cs.judge([1.08, 1.10, 1.09, 1.07, 1.11, 1.09], 1.09)["verdict"].startswith("IMU が小さく")
     assert cs.judge([1.00, 1.09], 1.09)["verdict"].startswith("まだ決められない")
     assert cs.judge([1.05], 1.09)["verdict"].startswith("セットが足りない")
+
+
+# ---------------------------------------------------------------------------
+# IMU の校正（M5 の 6 つの面を順に下にして置いた記録 → 軸ごとのゼロ点のずれと感度）
+# ---------------------------------------------------------------------------
+FACES = [(0, 0, 1), (0, 0, -1), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)]   # 上を向く軸（z+ = 画面が上）
+
+
+def make_calibration_recording(offset, sens, faces=FACES, rounds=2, hold=10.0, move=3.0, pause=0.0,
+                               tilt_deg=8.0, fs=100.0, seed=0):
+    """
+    M5 を机の上で、面を順に下にして置いた受信の記録（raw_BAR.csv と同じ列）を作る。
+    センサの読み = 感度 × 本当の加速度 + ゼロ点のずれ + ノイズ（軸ごと。単位 g）。
+    置き方はきっちり垂直ではなく、tilt_deg まで斜め。置き換える間（move 秒）は手で持って動かす。
+    pause > 0 なら、置き換える途中でその秒数だけ手が止まる（置き方には数えないはずの短い静止）
+    """
+    rng = np.random.default_rng(seed)
+
+    def tilted(d):
+        d = np.asarray(d, float)
+        side = np.cross(d, rng.normal(size=3))
+        side /= np.linalg.norm(side)
+        u = d + np.tan(np.radians(rng.uniform(0, tilt_deg))) * side
+        return u / np.linalg.norm(u)
+
+    def moving(n):      # 手で持っている間: 向きが定まらず、加速度もジャイロも大きく揺れる
+        u = rng.normal(size=(n, 3))
+        return u / np.linalg.norm(u, axis=1, keepdims=True) + rng.normal(0, 0.15, (n, 3)), rng.normal(0, 60, (n, 3))
+
+    def resting(u, n):
+        return np.tile(u, (n, 1)), np.zeros((n, 3))
+
+    parts = [moving(int(move * fs))]
+    for _ in range(rounds):
+        for d in faces:
+            parts.append(resting(tilted(d), int(hold * fs)))
+            if pause > 0:
+                parts += [moving(int(move * fs / 2)), resting(tilted(rng.normal(size=3)), int(pause * fs))]
+            parts.append(moving(int(move * fs)))
+    acc = np.vstack([p[0] for p in parts])
+    gyr = np.vstack([p[1] for p in parts])
+    n = len(acc)
+    acc = acc * np.asarray(sens, float) + np.asarray(offset, float) + rng.normal(0, 0.008, (n, 3))
+    gyr = gyr + np.array([-4.3, -15.4, 17.8]) + rng.normal(0, 0.3, (n, 3))      # M5 のジャイロはオフセットが大きい
+    t = np.arange(n) / fs
+    return pd.DataFrame({"recv_time_s": t + rng.uniform(0, 0.004, n), "boot_ms": 500000 + np.round(t * 1000).astype(int),
+                         "ax_g": acc[:, 0], "ay_g": acc[:, 1], "az_g": acc[:, 2],
+                         "gx_dps": gyr[:, 0], "gy_dps": gyr[:, 1], "gz_dps": gyr[:, 2]})
+
+
+def test_calibration_recovers_zero_point_and_sensitivity():
+    """6 つの面を 2 周（置き方は 8° まで斜め）置いた記録から、軸ごとのゼロ点のずれと感度が出る。
+    z の感度が 4.5 % 大きいセンサでは、いつもの付け方（画面が上 = z が上）の速度も約 4.5 % 大きく出ると判定する"""
+    import calibrate_imu as ci
+    offset, sens = (-0.018, 0.012, 0.010), (1.010, 0.985, 1.045)
+    res = ci.calibrate(make_calibration_recording(offset, sens))
+    assert res["ok"] and res["n_places"] == 12
+    assert np.allclose(res["offset_g"], offset, atol=0.003)
+    assert np.allclose(res["sensitivity"], sens, atol=0.003)
+    assert res["rms_mg"] < 3.0                                   # 補正した後の大きさは、どの置き方でもほぼ 1 g
+    assert abs(res["velocity_factor"] - 1.045) < 0.005
+    lo, hi = res["velocity_factor_ci"]
+    assert lo < 1.045 < hi and hi - lo < 0.01
+    assert res["verdict"].startswith("IMU の速度が約 4.") and "大きく" in res["verdict"]
+
+
+def test_calibration_zero_point_shift_leaves_velocity_right():
+    """静止で 1.046 g と出ても、それが z のゼロ点のずれ（+0.046 g）なら感度は 1.00 で、IMU の速度の倍率は正しいと判定する。
+    言えるのは倍率（平均して本当の何倍に出るか）までで、レップごとの値まで正しいとは言わない（2026-11-16）"""
+    import calibrate_imu as ci
+    res = ci.calibrate(make_calibration_recording((-0.018, 0.0, 0.046), (1.0, 1.0, 1.0), seed=1))
+    assert res["ok"]
+    assert abs(res["velocity_factor"] - 1.0) < 0.005
+    assert abs(res["rest_reading_g"] - 1.046) < 0.003            # いつもの付け方で静止したときの読み
+    assert res["verdict"].startswith("IMU の速度の倍率は正しい")
+
+
+def test_calibration_needs_all_six_faces():
+    """置いていない面があると計算しない（足りない向きを返す）。ここでは y の 2 面を置いていない"""
+    import calibrate_imu as ci
+    res = ci.calibrate(make_calibration_recording((0.0, 0.0, 0.046), (1.0, 1.0, 1.0), faces=FACES[:4]))
+    assert not res["ok"] and res["n_places"] == 8
+    assert res["missing"] == ["y+", "y-"]
+    assert "sensitivity" not in res and "velocity_factor" not in res
+
+
+def test_calibration_ignores_short_stops():
+    """置き換える途中で 1 秒だけ手が止まったところは、置き方に数えない（3 秒以上の静止だけ使う）"""
+    import calibrate_imu as ci
+    res = ci.calibrate(make_calibration_recording((0.0, 0.0, 0.046), (1.0, 1.0, 1.0), pause=1.0, seed=2))
+    assert res["ok"] and res["n_places"] == 12
+    assert abs(res["velocity_factor"] - 1.0) < 0.005
+
+
+def test_calibration_single_round_gives_no_error_range():
+    """1 周（6 回）だけだと値は出るが、合い具合と幅は出せない（未知数 6 個に置き方 6 回でちょうど）"""
+    import calibrate_imu as ci
+    res = ci.calibrate(make_calibration_recording((0.0, 0.0, 0.046), (1.0, 1.0, 1.045), rounds=1, seed=3))
+    assert res["ok"] and res["n_places"] == 6
+    assert abs(res["velocity_factor"] - 1.045) < 0.005
+    assert res["rms_mg"] is None and res["velocity_factor_ci"] is None
+
+
+def test_calibration_session_reads_newest_folder_and_saves_result(tmp_path):
+    """受信フォルダ（日本語を含む場所でも）の raw_BAR.csv を読み、結果を同じフォルダの calibration_BAR.json に保存する。
+    フォルダを指定しないときは、いちばん新しい受信フォルダを使う"""
+    import calibrate_imu as ci
+    root = tmp_path / "校正"
+    old, new = root / "session_20261115_100000", root / "session_20261116_090000"
+    for folder, sens_z in ((old, 1.0), (new, 1.045)):
+        folder.mkdir(parents=True)
+        make_calibration_recording((0.0, 0.0, 0.046), (1.0, 1.0, sens_z)).to_csv(folder / "raw_BAR.csv", index=False)
+    assert ci.find_latest_session(root) == new
+    res = ci.calibrate_session(new)
+    saved = json.loads((new / "calibration_BAR.json").read_text(encoding="utf-8"))
+    assert saved["device"] == "BAR" and saved["ok"]
+    assert abs(saved["sensitivity"][2] - 1.045) < 0.003 and saved["verdict"] == res["verdict"]
+
+
+def test_calibration_session_saves_nothing_without_six_faces(tmp_path):
+    """6 つの面がそろわない記録（バーに付けたままのふつうの受信フォルダなど）には、結果のファイルを作らない"""
+    import calibrate_imu as ci
+    make_calibration_recording((0.0, 0.0, 0.046), (1.0, 1.0, 1.0), faces=FACES[:1]).to_csv(tmp_path / "raw_BAR.csv",
+                                                                                         index=False)
+    res = ci.calibrate_session(tmp_path)
+    assert not res["ok"] and res["missing"] == ["x+", "x-", "y+", "y-", "z-"]
+    assert [p.name for p in tmp_path.iterdir()] == ["raw_BAR.csv"]
+
+
+def test_calibration_reads_past_rest_readings(tmp_path):
+    """校正の結果と見比べるために、これまでのセットの静止時の値（特徴量の一覧の imu_gravity_ref_g）を読む。
+    一覧が無ければ None。校正を当てはめて作ったセット（imu_calibrated）は別に読む: 当てはめる前は 1.047 g 前後、
+    当てはめた後は 1.00 g 前後になるので、混ぜると見比べられない"""
+    import calibrate_imu as ci
+    path = tmp_path / "features_all.csv"
+    assert ci.past_rest_readings(path) is None
+    pd.DataFrame({"set_no": [1, 2, 3], "imu_gravity_ref_g": [1.046, np.nan, 1.048]}).to_csv(path, index=False)
+    assert ci.past_rest_readings(path).tolist() == [1.046, 1.048]
+    assert ci.past_rest_readings(path, calibrated=True) is None          # 校正を当てはめたセットはまだ無い
+    pd.DataFrame({"set_no": [1, 2, 3, 4], "imu_gravity_ref_g": [1.046, 1.001, np.nan, 0.999],
+                  "imu_calibrated": [False, True, np.nan, True]}).to_csv(path, index=False)   # 3 は動画だけのセット
+    assert ci.past_rest_readings(path).tolist() == [1.046]
+    assert ci.past_rest_readings(path, calibrated=True).tolist() == [1.001, 0.999]
+
+
+# ---------------------------------------------------------------------------
+# 校正を速度の計算に当てはめる（2026-11-16）
+#   calibrate_imu.py --apply が data/_calib/calibration_<デバイス>.json を保存し、extract_features が IMU を読むときに
+#   本当の加速度 = (読み − ゼロ点のずれ) / 感度 を当てはめる。ファイルが無ければ、これまでと同じ計算
+# ---------------------------------------------------------------------------
+SENSOR_OFFSET, SENSOR_SENS = (-0.018, 0.0, 0.049), (0.998, 0.996, 1.045)   # z の感度が 4.5 % 大きいセンサ
+
+
+def sensor_reading(true_imu, offset=SENSOR_OFFSET, sens=SENSOR_SENS):
+    """ずれの無いセンサの IMU（make_imu(g_bias=1.0)）を、感度 sens・ゼロ点のずれ offset のセンサの読みに作り替える"""
+    read = true_imu.copy()
+    for c, b, s in zip(("ax_g", "ay_g", "az_g"), offset, sens):
+        read[c] = true_imu[c] * s + b
+    return read
+
+
+def calibration_folders(root, offset=SENSOR_OFFSET, sens=SENSOR_SENS, n=3, faces_each=None):
+    """校正の記録を n 回（受信フォルダ n 個。1 回につき面を 1 周）作る。faces_each で記録ごとに置く面を変えられる"""
+    folders = []
+    for k in range(n):
+        folder = root / f"session_20261115_14{k:02d}00"
+        folder.mkdir(parents=True)
+        faces = faces_each[k] if faces_each else FACES
+        make_calibration_recording(offset, sens, faces=faces, rounds=1, seed=10 + k).to_csv(folder / "raw_BAR.csv",
+                                                                                           index=False)
+        folders.append(folder)
+    return folders
+
+
+def test_apply_calibration_undoes_zero_point_and_sensitivity():
+    """校正を当てはめると、センサの読み（感度 × 本当の加速度 + ゼロ点のずれ）が本当の加速度に戻る。
+    ジャイロ・時刻と、元の表は変えない。校正が無ければ（None）表をそのまま返す"""
+    true, _, _ = make_imu(n_reps=3, g_bias=1.0)
+    read = sensor_reading(true)
+    before = read.copy()
+    got = ef.apply_calibration(read, {"offset_g": list(SENSOR_OFFSET), "sensitivity": list(SENSOR_SENS)})
+    for c in ("ax_g", "ay_g", "az_g"):
+        assert np.allclose(got[c], true[c], atol=1e-12)
+    for c in ("timestamp_ms", "gx_dps", "gy_dps", "gz_dps"):
+        assert got[c].equals(read[c])
+    pd.testing.assert_frame_equal(read, before)
+    assert ef.apply_calibration(read, None) is read
+
+
+def test_imu_velocity_is_right_after_calibration_when_sensitivity_is_off():
+    """z の感度が 4.5 % 大きいセンサでは、そのままだと速度が約 4.5 % 大きく出る（重力の実測値を引いても感度のずれは残る）。
+    校正を当てはめると、ずれの無いセンサと同じ速度になり、静止時の値も 1 g になる"""
+    true, _, _ = make_imu(n_reps=5, g_bias=1.0)
+    read = sensor_reading(true)
+    ref = ef.compute_imu_features(true)
+    raw = ef.compute_imu_features(read)
+    cal = ef.compute_imu_features(ef.apply_calibration(read, {"offset_g": list(SENSOR_OFFSET),
+                                                              "sensitivity": list(SENSOR_SENS)}))
+    assert ref["imu_n_reps_detected"] == raw["imu_n_reps_detected"] == cal["imu_n_reps_detected"] == 5
+    for key in ("imu_first_rep_mcv_mps", "imu_last_rep_mcv_mps"):
+        assert abs(raw[key] / ref[key] - 1.045) < 0.01
+        assert abs(cal[key] / ref[key] - 1.0) < 0.002
+    assert abs(raw["imu_gravity_ref_g"] - 1.094) < 0.005         # 1.045 + 0.049（z が上）
+    assert abs(cal["imu_gravity_ref_g"] - 1.0) < 0.005
+
+
+def test_load_calibration_reads_the_device_file(tmp_path):
+    """解析に使う校正は data/_calib/calibration_<デバイス>.json。無ければ None（当てはめない）。
+    値の足りないファイルは、黙って無視せず止める（気づかないまま数字が変わらないように）"""
+    assert ef.load_calibration(tmp_path, "BAR") is None
+    (tmp_path / "_calib").mkdir()
+    assert ef.load_calibration(tmp_path, "BAR") is None
+    calib = {"device": "BAR", "offset_g": list(SENSOR_OFFSET), "sensitivity": list(SENSOR_SENS),
+             "sources": ["session_20261115_143304"]}
+    path = tmp_path / "_calib" / "calibration_BAR.json"
+    path.write_text(json.dumps(calib), encoding="utf-8")
+    got = ef.load_calibration(tmp_path, "BAR")
+    assert got["offset_g"] == calib["offset_g"] and got["sensitivity"] == calib["sensitivity"]
+    assert got["sources"] == calib["sources"]
+    assert ef.load_calibration(tmp_path, "HIP") is None          # ほかのデバイスの校正は使わない
+    path.write_text(json.dumps({"offset_g": [0.0, 0.0, 0.0]}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ef.load_calibration(tmp_path, "BAR")
+
+
+def test_calibration_all_pools_recordings_into_one_file(tmp_path):
+    """1 周だけの記録が 3 回あるとき、置き方 18 回をまとめて 1 つの当てはめにし（1 回ずつでは出せない合い具合と幅も出る）、
+    解析に使う校正として data/_calib の直下に保存する。記録ごとの倍率も返す（記録どうしが合っているかの確認用）。
+    記録のフォルダには何も足さない"""
+    import calibrate_imu as ci
+    root = tmp_path / "data" / "_calib"
+    folders = calibration_folders(root)
+    res = ci.calibrate_all(root)
+    assert res["ok"] and res["n_places"] == 18 and res["dof"] == 12
+    assert res["device"] == "BAR" and res["sources"] == [f.name for f in folders]
+    assert np.allclose(res["offset_g"], SENSOR_OFFSET, atol=0.003)
+    assert np.allclose(res["sensitivity"], SENSOR_SENS, atol=0.003)
+    assert res["rms_mg"] is not None and res["velocity_factor_ci"] is not None
+    assert [s["source"] for s in res["per_source"]] == res["sources"]
+    assert all(s["n_places"] == 6 and abs(s["velocity_factor"] - res["velocity_factor"]) < 0.01
+               for s in res["per_source"])
+    saved = json.loads((root / "calibration_BAR.json").read_text(encoding="utf-8"))
+    assert saved["offset_g"] == res["offset_g"] and saved["sensitivity"] == res["sensitivity"]
+    assert saved["device"] == "BAR" and saved["sources"] == res["sources"]
+    assert all([p.name for p in f.iterdir()] == ["raw_BAR.csv"] for f in folders)
+
+
+def test_calibration_all_completes_six_faces_across_recordings(tmp_path):
+    """1 回の記録では面が足りなくても、まとめて 6 つの面がそろえば計算する（その記録だけの倍率は出せないので None）"""
+    import calibrate_imu as ci
+    root = tmp_path / "_calib"
+    calibration_folders(root, n=2, faces_each=[FACES[:4], FACES[2:]])
+    res = ci.calibrate_all(root)
+    assert res["ok"] and res["n_places"] == 8
+    assert np.allclose(res["sensitivity"], SENSOR_SENS, atol=0.003)
+    assert [s["velocity_factor"] for s in res["per_source"]] == [None, None]
+
+
+def test_calibration_all_saves_nothing_without_six_faces(tmp_path):
+    """まとめても 6 つの面がそろわなければ保存しない。前に保存した校正はそのまま残る"""
+    import calibrate_imu as ci
+    root = tmp_path / "_calib"
+    calibration_folders(root, n=2, faces_each=[FACES[:4], FACES[:2]])
+    (root / "calibration_BAR.json").write_text('{"keep": true}', encoding="utf-8")
+    res = ci.calibrate_all(root)
+    assert not res["ok"] and res["missing"] == ["y+", "y-"] and res["n_places"] == 6
+    assert json.loads((root / "calibration_BAR.json").read_text(encoding="utf-8")) == {"keep": True}
+
+
+def test_features_apply_saved_calibration_and_record_it(tmp_path):
+    """校正の記録 → calibrate_imu.calibrate_all が保存 → extract_features が IMU を読むときに当てはめる、の通し。
+    z の感度が 4.5 % 大きいセンサ: 校正のファイルが無ければこれまでと同じ計算（速度は約 4.5 % 大きいまま）、
+    あれば本当の速度になり、特徴量に「校正を当てはめた」ことと使った値が残る。IMU の CSV は書き換えない"""
+    import calibrate_imu as ci
+    data = tmp_path / "data"
+    ses = data / "S999" / "SES001"
+    (ses / "imu").mkdir(parents=True)
+    true, _, _ = make_imu(n_reps=5, g_bias=1.0)
+    imu_csv = ses / "imu" / "set01_BAR.csv"
+    sensor_reading(true).to_csv(imu_csv, index=False)
+    csv_bytes = imu_csv.read_bytes()
+    meta = {"session_id": "SES001", "subject_id": "S999", "date": "2026-11-16",
+            "sets": [{"set_no": 1, "reps_completed": 5, "rpe": 8, "weight_kg": 100}]}
+    (ses / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    ref = ef.compute_imu_features(true, expected_reps=5)["imu_first_rep_mcv_mps"]
+
+    f0 = ef.extract_one_trial(imu_csv, None, ses / "meta.json", 1)
+    assert f0["imu_calibrated"] is False and f0["_imu_calibration"] is None
+    as_before = ef.compute_imu_features(pd.read_csv(imu_csv), expected_reps=5)
+    assert f0["imu_first_rep_mcv_mps"] == as_before["imu_first_rep_mcv_mps"]
+    assert abs(f0["imu_first_rep_mcv_mps"] / ref - 1.045) < 0.01
+
+    calibration_folders(data / "_calib")
+    res = ci.calibrate_all(data / "_calib")
+    f1 = ef.extract_one_trial(imu_csv, None, ses / "meta.json", 1)
+    assert f1["imu_calibrated"] is True
+    assert f1["_imu_calibration"] == {"offset_g": res["offset_g"], "sensitivity": res["sensitivity"],
+                                      "sources": res["sources"]}
+    assert abs(f1["imu_first_rep_mcv_mps"] / ref - 1.0) < 0.01
+    assert abs(f1["imu_gravity_ref_g"] - 1.0) < 0.005
+    assert imu_csv.read_bytes() == csv_bytes
+
+
+def test_compare_side_imu_applies_saved_calibration(tmp_path):
+    """横から撮るセットの比較でも、保存した校正を IMU に当てはめる（前の動画との比較と同じ IMU の速度で比べるため）。
+    z の感度が 4.5 % 大きいセンサ: 校正を保存すると、IMU の MCV が 4.5 % 小さくなり、横 ÷ IMU がほぼ 1 になる"""
+    import compare_side_imu as cs
+    folder = tmp_path / "_side" / "session_20261105_180000_60kg_5rep"
+    folder.mkdir(parents=True)
+    t, pos, _ = side_truth()
+    side_receiver_folder(folder, t, pos)
+    raw = pd.read_csv(folder / "raw_BAR.csv")
+    raw["az_g"] = (raw["az_g"] - 0.05) * 1.045 + 0.05            # 感度 1.045・ゼロ点のずれ +0.05 g のセンサの読みに
+    raw.to_csv(folder / "raw_BAR.csv", index=False)
+    write_plate_video(folder / "side01.mp4", t, pos)
+    ratio = lambda rows: pd.DataFrame(rows)["vid_mcv"].mean() / pd.DataFrame(rows)["imu_mcv"].mean()   # noqa: E731
+    before, _ = cs.compare_session(folder, plate_mm=450.0, allow_gui=False)
+    (tmp_path / "_calib").mkdir()
+    (tmp_path / "_calib" / "calibration_BAR.json").write_text(json.dumps(
+        {"device": "BAR", "offset_g": [0.0, 0.0, 0.05], "sensitivity": [1.0, 1.0, 1.045], "sources": ["合成"]}),
+        encoding="utf-8")
+    after, _ = cs.compare_session(folder, plate_mm=450.0, allow_gui=False)
+    assert len(before) == len(after) == 5
+    assert abs(ratio(after) / ratio(before) - 1.045) < 0.01
+    assert abs(ratio(after) - 1.0) < 0.05
