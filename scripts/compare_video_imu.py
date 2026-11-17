@@ -6,7 +6,8 @@
  時刻合わせ（extract_features.sync_video_imu）が合ったセットで、動画のレップ i と IMU のレップ i を
  同じ時間軸に置き、両方の速度の波形に「同じ定義」を当てて比べる。
    上昇区間 : 底のあとで速度が初めてピークの 5 %（最低 0.02 m/s）を超えた所から、ピークのあとでそれを
-              下回る直前まで（extract_features.concentric_phase と同じ。上がる途中で速度が落ちても底から数える。2026-11-12）
+              下回る直前まで（extract_features.concentric_phase と同じ。上がる途中で速度が落ちても底から数える。2026-11-12）。
+              バーがいちばん高い所の 9 割に届く前に速度が落ちたときは、そこで終わりにしない（extract_features.rise_end。2026-11-16）
    MCV      : 上昇区間の平均速度 [m/s]
    ピーク   : 上昇区間の最大速度 [m/s]
    上昇の変位: 上昇区間の終わりの位置 − 始まりの位置 [cm]（MCV ≒ 上昇の変位 / 上昇時間）
@@ -135,6 +136,9 @@ def rep_metrics(t, z, v, ts, te):
     上がり始めは、底 b のあとで速度が初めてしきい値を超えた所（2026-11-12 修正）。以前はピークからさかのぼって
     決めていたので、上がる途中で速度がしきい値まで落ちると、そこより前が切れていた（11/10 set03 の 4 回目の IMU:
     上昇時間 0.93 秒、動画 1.97 秒）。
+    上がり終わりは extract_features.rise_end（2026-11-16 修正）: ピークのあと速度がしきい値を下回る直前。ただし、
+    バーが「底から、レップの中（レップの終わりの PEAK_POST_S 秒後まで）でいちばん高い所まで」の 9 割に届く前に
+    速度が落ちても終わりにせず、その先へ続ける（いちばん速い所が上昇の前半にあり、その後で止まりかけるレップ）。
     """
     n = len(t)
     lo, hi = int(np.searchsorted(t, ts - STAND_PRE_S)), int(np.searchsorted(t, te + WIN_POST_S))
@@ -148,11 +152,10 @@ def rep_metrics(t, z, v, ts, te):
         return None
     p = b + int(np.nanargmax(v[b:hp]))                          # 上昇のピーク（レップの中）
     thr = max(ASC_MIN, ASC_FRAC * float(v[p]))
-    s, e = b, p
+    s = b
     while s < p and not v[s] > thr:
         s += 1
-    while e < hi - 1 and v[e + 1] > thr:
-        e += 1
+    e = ef.rise_end(v, z, b, p, thr, hi - 1, hp - 1)
     stand = float(np.nanmedian(z[lo:i_s + 1]))
     bottom = float(np.nanpercentile(z[i_s:i_e + 1], 1))
     return {"ascent_s": float(t[e] - t[s]), "mcv": float(np.nanmean(v[s:e + 1])),

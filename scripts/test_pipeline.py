@@ -272,17 +272,20 @@ def test_imu_double_hump_ascent_counts_each_rep_once():
     assert min(np.diff(peaks)) > 2.5                       # 3つとも別のレップ（間隔 ≒ 5.1 s）
 
 
-def sticking_stop_trajectory(fs=100.0, n_reps=3, depth=0.55, descent=1.0, ascent=2.0, rest=2.5, lead=20.0):
+def sticking_stop_trajectory(fs=100.0, n_reps=3, depth=0.55, descent=1.0, ascent=2.0, rest=2.5, lead=20.0,
+                             humps=(0.9, 1.0)):
     """
     上がる途中で一度止まり、少し下がってから上がりきるレップ（速度が最も遅い所 −0.06 m/s、0 未満が 0.24 秒）。
     11/10 set03 の 4 回目（RPE 8）では、上がる途中でバーの端の IMU の速度が 0.25 秒ほど −0.05 m/s まで落ちた
     （原因は分かっていない: バーが左右に揺れたためかどうかは確かめられていない）。
+    humps: 切り返し直後の山と、止まった後の山の高さ。既定はいちばん速い所が止まった後（上昇の後半）にある。
+           (1.6, 0.6) にすると、いちばん速い所が止まる前（上昇の前半）に来る
     戻り値: t, y（立位からの下がり量 [m]、下が正）, 各レップの区間 [(始まり, 底, 終わり) [s]], 底からの上がり量 [m]
     """
     s = np.linspace(0, 1, int(ascent * fs), endpoint=False)
-    v_shape = (0.9 * np.exp(-((s - 0.18) / 0.09) ** 2)       # 切り返し直後の山
+    v_shape = (humps[0] * np.exp(-((s - 0.18) / 0.09) ** 2)  # 切り返し直後の山
                - 0.06 * np.exp(-((s - 0.42) / 0.06) ** 2)    # 止まって少し下がる
-               + 1.0 * np.exp(-((s - 0.72) / 0.13) ** 2))    # 上がりきる
+               + humps[1] * np.exp(-((s - 0.72) / 0.13) ** 2))   # 上がりきる
     v_shape *= np.sin(np.pi * s)                             # 始まりと終わりは速度 0
     up = np.cumsum(v_shape)
     up = depth * up / up[-1]                                 # 0 → depth まで上がる
@@ -341,6 +344,146 @@ def test_compare_rep_metrics_counts_rise_from_bottom_through_mid_rise_stop():
         m = cv.rep_metrics(t, z, v, ts, te)
         assert abs(m["ascent_s"] - true_s) < 0.05
         assert abs(m["mcv"] - true_mcv) / true_mcv < 0.03
+
+
+def imu_of_vertical_motion(t, y, seed=3):
+    """上下にだけ動くバーの IMU（y = 立位からの下がり量 [m]、下が正。静止で 1.05 g、センサの雑音つき）"""
+    dt = float(t[1] - t[0])
+    a_true = np.gradient(np.gradient(-y, dt), dt)
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame({
+        "timestamp_ms": t * 1000.0,
+        "ax_g": rng.normal(0, 0.01, len(t)), "ay_g": rng.normal(0, 0.01, len(t)),
+        "az_g": 1.05 + a_true / G + rng.normal(0, 0.01, len(t)),
+        "gx_dps": -3.8 + rng.normal(0, 1, len(t)), "gy_dps": -12.9 + rng.normal(0, 1, len(t)),
+        "gz_dps": 16.0 + rng.normal(0, 1, len(t)),
+    })
+
+
+def windows_ending_at_nine_tenths(windows, up, fs):
+    """
+    レップの終わりを、動画のレップの終わりと同じ「沈み込みの 1 割まで戻った時刻」にした区間（detect_pose_reps の決め方）。
+    windows の終わりは立ち上がりきった時刻なので、そこから上昇の長さを引いて、9 割まで上がった時刻を足す
+    """
+    k90 = int(np.argmax(up >= 0.9 * up[-1]))
+    return [(ts, tb, te - len(up) / fs + k90 / fs) for ts, tb, te in windows]
+
+
+def test_rise_end_continues_through_stop_below_nine_tenths_of_the_height():
+    """
+    上がり終わりの決め方（extract_features.rise_end。IMU の特徴量にも、動画と IMU の比較にも同じものを使う）:
+    バーが「底から、レップの中でいちばん高い所まで」の 9 割に届く前に速度がしきい値を下回っても、上がり終わりにしない。
+    その先で速度がもう一度しきい値を超える所から続けて、9 割を超えたあとで下回る直前を上がり終わりにする。
+    """
+    fs = 100.0
+    h1 = 0.9 * np.sin(np.pi * np.linspace(0, 1, 60, endpoint=False))        # 前半の山（いちばん速い。高さの約 6 割まで）
+    h2 = 0.5 * np.sin(np.pi * np.linspace(0, 1, 80, endpoint=False))        # 止まりかけた後の山
+    v = np.concatenate([np.zeros(10), h1, np.full(25, -0.02), h2, np.zeros(60)])
+    z = np.cumsum(v) / fs
+    b, p = 10, 10 + int(np.argmax(h1))
+    thr = max(0.02, 0.05 * float(v[p]))
+    first_end, second_end = 10 + 60 - 1, 10 + 60 + 25 + 80 - 1
+    assert (z[first_end] - z[b]) / (z.max() - z[b]) < 0.7                   # 前半の山の終わりは、まだ高さの 7 割より下
+    e = ef.rise_end(v, z, b, p, thr, stop=len(v) - 1, limit=len(v) - 1)
+    assert second_end - 5 <= e <= second_end                                # 後ろの山の終わりまで数える
+    # 続きを探すのは limit（レップの終わり）まで。その先にしか続きが無ければ、前半の山の終わりのまま
+    e_cut = ef.rise_end(v, z, b, p, thr, stop=len(v) - 1, limit=first_end + 10)
+    assert first_end - 5 <= e_cut <= first_end
+
+
+def test_rise_end_does_not_run_on_to_a_bump_after_the_top():
+    """
+    立ち上がりきった後の小さな揺れは上昇に数えない。実データの IMU では、上がり終わりの 0.18〜0.27 秒後に
+    0.05〜0.13 m/s の上向きの速度が 0.04〜0.18 秒続くレップが 146 レップ中 28 レップあった（2026-11-16、ロックアウトまでの範囲）。
+    「レップの終わりの手前で、最後にしきい値を超えていた所」を上がり終わりにすると、そこまで延びてしまう。
+    """
+    fs = 100.0
+    rise = 0.8 * np.sin(np.pi * np.linspace(0, 1, 120, endpoint=False))     # 1.2 秒の上昇
+    bump = 0.10 * np.sin(np.pi * np.linspace(0, 1, 15, endpoint=False))     # 0.15 秒・0.10 m/s の揺れ
+    v = np.concatenate([np.zeros(10), rise, np.zeros(20), bump, np.zeros(50)])
+    z = np.cumsum(v) / fs
+    b, p = 10, 10 + int(np.argmax(rise))
+    thr = max(0.02, 0.05 * float(v[p]))
+    e = ef.rise_end(v, z, b, p, thr, stop=len(v) - 1, limit=len(v) - 1)
+    assert 10 + 110 <= e <= 10 + 119                                        # 上昇の山の終わり（揺れの手前）
+
+
+def test_concentric_phase_counts_past_the_stop_only_when_rep_end_is_given():
+    """
+    concentric_phase は、底とレップの終わり（limit）が分かっているときに、止まりかけの先まで上昇を数える。
+    limit が無いときは以前の決め方（いちばん速い所のあと、速度がしきい値を下回る直前）のまま
+    """
+    fs = 100.0
+    h1 = 0.9 * np.sin(np.pi * np.linspace(0, 1, 60, endpoint=False))
+    h2 = 0.5 * np.sin(np.pi * np.linspace(0, 1, 80, endpoint=False))
+    v = np.concatenate([np.zeros(10), h1, np.full(25, -0.02), h2, np.zeros(60)])
+    a = np.gradient(v) * fs
+    b, p = 10, 10 + int(np.argmax(h1))
+    first_end, second_end = 10 + 60 - 1, 10 + 60 + 25 + 80 - 1
+    s, e, _ = ef.concentric_phase(v, a, p, b, limit=len(v) - 1)
+    assert s <= b + 5 and second_end - 5 <= e <= second_end
+    _, e_old, _ = ef.concentric_phase(v, a, p, b)
+    assert first_end - 5 <= e_old <= first_end
+
+
+def test_imu_rise_runs_to_the_top_when_fastest_point_comes_before_mid_rise_stop():
+    """
+    いちばん速い所が上昇の前半にあり、その後で止まりかけるレップでも、上昇は立ち上がりきるまで数える（2026-11-16 修正）。
+    それまでは「いちばん速い所のあと、速度がしきい値を下回る直前」を上がり終わりにしていたので、止まりかけた所で
+    上昇が終わったと数えていた（この合成データでは、真の 1.65 秒に対して 0.55 秒）。
+    レップは動画の区切りで取る（実データの 29 セット中 28 セットと同じ）。IMU だけで数えるときは、上がる途中で速度が
+    0 を下回るレップがあるとレップの数え方の方が先に崩れる（3 回が 2 回になる。別の弱点で、ここでは扱わない）
+    """
+    fs = 100.0
+    t, y, windows, up = sticking_stop_trajectory(fs, humps=(1.6, 0.6))
+    true_s, true_mcv = true_rise(up, fs)
+    assert np.argmax(np.gradient(up)) < 0.3 * len(up)        # この合成データの前提: いちばん速い所は上昇の前半
+    imu = imu_of_vertical_motion(t, y, seed=3)
+    f = ef.compute_imu_features(imu, expected_reps=3, rep_windows=windows_ending_at_nine_tenths(windows, up, fs))
+    assert f["imu_n_reps_detected"] == 3
+    for i, r in enumerate(f["_imu_reps"]):
+        assert abs(r["concentric_s"] - true_s) < 0.15, \
+            f"{i + 1} 回目: 上昇時間 {r['concentric_s']:.2f} 秒（真値 {true_s:.2f}）"
+        assert abs(r["mcv"] - true_mcv) / true_mcv < 0.1, f"{i + 1} 回目: MCV {r['mcv']:.3f} m/s（真値 {true_mcv:.3f}）"
+
+
+@pytest.mark.parametrize("lead,ascent", [(20.0, 2.5), (20.0, 3.0), (20.0, 3.5), (10.0, 2.5), (3.0, 4.0), (3.0, 5.0)])
+def test_imu_lockout_is_not_taken_at_mid_rise_stop(lead, ascent):
+    """
+    IMU のロックアウト（立ち上がりきって、速度 0・変位 0 とみなす時刻。ここで速度のずれを解く）を、上がる途中で
+    止まりかけた所に取り違えない（2026-11-16 修正。動画のレップ区間があるとき）。それまでは、いちばん速い所が
+    上昇の前半にあるレップで、次の 2 つのときに取り違えていた。
+      ・レップの前に長く静止していたとき（lead 10〜20 秒の 1 回目: 上昇時間 2.06 秒 → 0.82〜0.99 秒 など）。
+        速度のずれを解く区間が長いと、止まりかけた所の小さな下向きの速度が、残りの高さを打ち消す大きさの変位に化ける
+      ・上昇が長く、ロックアウトが「いちばん速い所の 2.5 秒後」までに来ないとき（上昇 4〜5 秒: 3.29 秒 → 1.3〜1.6 秒 など）
+    動画のレップの終わり（肩が沈み込みの 1 割まで戻った時刻）の 0.3 秒前より前はロックアウトにせず、
+    探す範囲は少なくともその 1.5 秒後までとる。
+    """
+    fs = 100.0
+    t, y, windows, up = sticking_stop_trajectory(fs, ascent=ascent, lead=lead, humps=(1.6, 0.6))
+    true_s, true_mcv = true_rise(up, fs)
+    imu = imu_of_vertical_motion(t, y, seed=3)
+    f = ef.compute_imu_features(imu, expected_reps=3, rep_windows=windows_ending_at_nine_tenths(windows, up, fs))
+    assert f["imu_n_reps_detected"] == 3
+    for i, r in enumerate(f["_imu_reps"]):
+        assert abs(r["concentric_s"] - true_s) / true_s < 0.08, \
+            f"{i + 1} 回目: 上昇時間 {r['concentric_s']:.2f} 秒（真値 {true_s:.2f}）"
+        assert abs(r["mcv"] - true_mcv) / true_mcv < 0.1, f"{i + 1} 回目: MCV {r['mcv']:.3f} m/s（真値 {true_mcv:.3f}）"
+
+
+def test_compare_rep_metrics_runs_to_the_top_when_fastest_point_comes_before_mid_rise_stop():
+    """動画と IMU の比較（compare_video_imu.rep_metrics。横からの比較も使う）も、立ち上がりきるまで数える（2026-11-16 修正）"""
+    import compare_video_imu as cv
+    fs = 100.0
+    t, y, windows, up = sticking_stop_trajectory(fs, humps=(1.6, 0.6))
+    true_s, true_mcv = true_rise(up, fs)
+    z = -y                                                   # 上が正
+    v = np.gradient(z) * fs
+    for ts, _, te in windows_ending_at_nine_tenths(windows, up, fs):
+        m = cv.rep_metrics(t, z, v, ts, te)
+        assert abs(m["ascent_s"] - true_s) < 0.05, f"上昇時間 {m['ascent_s']:.2f} 秒（真値 {true_s:.2f}）"
+        assert abs(m["mcv"] - true_mcv) / true_mcv < 0.03
+        assert m["rom"] > 0.95 * m["depth"]                  # 上がった距離が深さとほぼ同じ（途中で切れていない）
 
 
 def test_imu_single_rep_has_no_velocity_loss():
@@ -577,6 +720,10 @@ def test_train_runs_end_to_end(tmp_path):
     assert not (out / "mean_rpe__mean.pkl").exists() and (out / "video_vbt__ridge.pkl").exists()
     report = (out / "report.md").read_text(encoding="utf-8")
     assert "## 条件の説明" in report and "最後のレップの速度だけ" in report
+    # RPE 5 未満のセットが無いデータでは、主結果の学習は全 RPE。保存するモデルも全部で学習し、予測は 1〜10 に収める
+    assert "主結果は「学習: 全 RPE／" in report
+    best = joblib.load(out / "best.pkl")
+    assert best["train_min_rpe"] is None and best["pred_range"] == [1.0, 10.0]
 
 
 def test_train_mean_baseline_predicts_training_mean():
@@ -620,9 +767,12 @@ def test_train_compares_training_rpe_range(tmp_path):
         df.loc[light & df[c].notna(), c] += 0.25            # 軽いので速い
     csv = tmp_path / "features_all.csv"
     df.to_csv(csv, index=False)
+    import os
+    # 画面への出力を UTF-8 で受け取る（何もしないと端末の文字コードで出るので、日本語の行を確かめられない）
     r = subprocess.run([sys.executable, str(SCRIPT_DIR / "train_rpe_model.py"), "--input", str(csv),
                         "--output-dir", str(tmp_path / "models"), "--kmax", "2"],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8"))
     assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
     out = next((tmp_path / "models").iterdir())
     res = pd.read_csv(out / "results.csv")
@@ -637,7 +787,44 @@ def test_train_compares_training_rpe_range(tmp_path):
     assert pred.loc[pred["train_set"] == "rpe>=5", "pred"].min() >= 5.0
     curves = pd.read_csv(out / "curves.csv")
     assert {"all", "rpe>=5"} <= set(curves["train_set"])
-    assert "学習データの範囲の比較" in (out / "report.md").read_text(encoding="utf-8")
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert "学習データの範囲の比較" in report
+    # 主結果（表・図・保存するモデル）は「RPE 5 以上だけで学習」（2026-11-17 ユーザー決定。RPE 4 以下は目安で付けていて、
+    # 数字の違いに意味がないので学習に使わない）。「全 RPE で学習」は比較用の表に残る
+    assert "主結果は「学習: RPE 5 以上／評価: RPE 6 以上」" in report
+    assert "主結果（学習: RPE 5 以上／評価: RPE 6 以上）" in r.stdout
+    assert "（学習: RPE 5 以上／評価: RPE 6 以上）" in report.split("## B. 汎用")[1].splitlines()[0]   # 表の見出しにも範囲
+    import joblib
+    import train_rpe_model as trm
+    best = joblib.load(out / "best.pkl")
+    main = res[(res["scheme"] == "B_loso") & (res["train_set"] == "rpe>=5") & (res["eval_set"] == "rpe>=6")
+               & (res["condition"] != "mean_rpe")].sort_values("mae").iloc[0]
+    assert (best["condition"], best["model_name"]) == (main["condition"], main["model"])
+    # 保存するモデルも RPE 5 以上のセットだけで学習し、5 未満は予測しない
+    assert best["train_min_rpe"] == 5.0 and best["pred_range"] == [5.0, 10.0]
+    full = trm.mark_unusable(pd.read_csv(csv))
+    elig = trm.eligible(full, trm.build_conditions(full, False)["video_vbt"])
+    assert joblib.load(out / "video_vbt__ridge.pkl")["n_train"] == int((elig["rpe"] >= 5).sum()) < len(elig)
+
+
+def test_predict_keeps_predictions_in_the_trained_range():
+    """
+    保存したモデルで予測するとき（predict_rpe.py）も、評価のときと同じ範囲に収める。RPE 5 以上だけで学習したモデルは
+    5 未満を予測しない（5 と出たら「5 以下」の意味）。範囲を持たない古いモデルは今までどおり、そのまま返す
+    """
+    import predict_rpe as pr
+
+    class Fixed:
+        def predict(self, X):
+            return np.array([3.2, 7.0, 11.5])[:len(X)]
+
+    df = pd.DataFrame({"v": [0.9, 0.5, 0.1], "rpe": [4.0, 7.0, 10.0]})
+    new = {"model": Fixed(), "feature_cols": ["v"], "pred_range": [5.0, 10.0]}
+    assert list(pr.predict_dataframe(new, df)["predicted_rpe"]) == [5.0, 7.0, 10.0]
+    assert pr.predict_single(new, {"v": 0.9}) == 5.0
+    old = {"model": Fixed(), "feature_cols": ["v"]}
+    assert list(pr.predict_dataframe(old, df)["predicted_rpe"]) == [3.2, 7.0, 11.5]
+    assert pr.predict_single(old, {"v": 0.9}) == 3.2
 
 
 # ---------------------------------------------------------------------------

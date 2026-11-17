@@ -284,7 +284,11 @@ def select_reps(v_hp, fs, dt, expected_reps=None, min_rom=0.15):
     return [(ds, dmin, pk) for ds, dmin, pk, _ in cands]
 
 
-def solve_lockout(v_raw, a0, pk, fs, dt, limit=None):
+LOCKOUT_POST_S = 1.5   # 動画のレップの終わりが分かるとき、ロックアウトは少なくともその何秒後まで探すか
+                       # （修正の時点の実データ 146 レップでは、ロックアウトは動画のレップの終わりの 0.13〜1.43 秒後）
+
+
+def solve_lockout(v_raw, a0, pk, fs, dt, limit=None, rep_end=None):
     """
     1レップ分のドリフトを解く。立位（a0: 速度 0）から始まり、ロックアウト T で
     「速度 0 かつ 変位 0（立位の高さに戻る）」になるように、一定のずれ（センサのバイアス）を引く。
@@ -294,9 +298,20 @@ def solve_lockout(v_raw, a0, pk, fs, dt, limit=None):
     しゃがみが入り、そこで変位の残りが 0 を横切るので T を次のレップの中に取り違え、そのレップと次のレップの速度が
     崩れていた（11/6 の 80 kg×8 の 4 回目が IMU 0.083 m/s、動画 0.545 m/s）。
     limit が上昇ピークの直後より前にある（区切りがおかしい）ときは使わない。
+    rep_end（動画のレップの終わり = 肩が沈み込みの 1 割まで戻った時刻、の位置）があれば、T はその SYNC_PAD_S 秒前より
+    前にしない。探す範囲は、少なくともその LOCKOUT_POST_S 秒後までとる（2026-11-16 修正）。
+    それまでは、いちばん速い所が上昇の前半にあり、その後で止まりかけるレップで、止まりかけた所を T に取り違える
+    ことがあった（合成データ。実データにはまだ無い）:
+      ・a0 が遠い（レップの前に長く静止していた）とき。T の速度を 0 に合わせる直線の補正が長い区間に掛かるので、
+        止まりかけた所の小さな下向きの速度（−0.05 m/s ほど）が、残りの高さを打ち消す大きさの変位になる
+      ・上昇が長く、ロックアウトがピークの 2.5 秒後までに来ないとき。範囲の中でいちばんましな所が選ばれる
+    実データの 146 レップは、どれも T が動画のレップの終わりより後ろで、範囲も広がらないので、値は変わらない。
     戻り値: (T, 補正後の速度 v[a0:T+1])
     """
     lo, hi = pk + max(1, int(0.05 * fs)), min(len(v_raw) - 1, pk + int(2.5 * fs))
+    if rep_end is not None:
+        lo = max(lo, int(rep_end) - int(SYNC_PAD_S * fs))
+        hi = max(hi, min(len(v_raw) - 1, int(rep_end) + int(LOCKOUT_POST_S * fs)))
     if limit is not None and int(limit) >= lo:
         hi = min(hi, int(limit))
     results = []
@@ -316,20 +331,73 @@ def solve_lockout(v_raw, a0, pk, fs, dt, limit=None):
     return T, vc
 
 
-def concentric_phase(v, a, p, b=None):
+RISE_DONE_FRAC = 0.9   # 上がり終わりにしてよい高さ: 底から「レップの中でいちばん高い所」までの、この割合。ここに届く前に
+                       # 速度がしきい値を下回っても、上がる途中で止まりかけただけとみなす（骨格のレップの終わり =
+                       # 沈み込みの 1 割まで戻った所: detect_pose_reps と同じ割合）
+RISE_POST_S = 0.2      # 上昇の続きを探すのは、動画のレップの終わり（沈み込みの 1 割まで戻った時刻）のこの秒数後まで
+                       # （compare_video_imu.PEAK_POST_S と同じ。その先は立ち上がりきった後の揺れ・歩き出しが入る）
+
+
+def rise_end(v, z, b, p, thr, stop, limit):
+    """
+    上がり終わりの位置（v・z の番号）。IMU の特徴量（concentric_phase）にも、動画と IMU の比較
+    （compare_video_imu.rep_metrics。横からの比較も）にも同じ決め方を当てる。
+      v: 速度（上が正）、z: 位置（上が正。b からの差だけを使う）、b: 底、p: 上昇でいちばん速い所、thr: 速度のしきい値
+      基本は、p のあとで速度が thr を下回る直前（速度が thr を超えている間は stop まで進む）。
+      ただし、そこでの高さ（b から）が「b〜limit でいちばん高い所」の RISE_DONE_FRAC に届いていなければ、
+      上がる途中で止まりかけただけとみなし、limit までに速度がもう一度 thr を超える所から続ける（2026-11-16 修正）。
+      続きが limit までに無ければ、そこまでを上昇とする。
+    それまでは基本の決め方だけだったので、いちばん速い所が上昇の前半にあり、その後で止まりかけるレップでは、
+    止まりかけた所を上がり終わりと数えていた（修正の時点の実データ 146 レップには無い: どのレップもいちばん速い所は
+    上昇時間の 67 % より後ろで、上がり終わりでの高さは 95 % 以上。RPE 9・10 のきついセットで起こりうる）。
+    limit の手前で最後に thr を超えた所、とはしない: 立ち上がりきった後の小さな揺れ（IMU では、上がり終わりの
+    0.18〜0.27 秒後に 0.05〜0.13 m/s の上向きの速度が 0.04〜0.18 秒。ロックアウトまでの範囲で 146 レップ中 28 レップ）
+    まで上昇に数えてしまう。
+    IMU のロックアウト（solve_lockout）そのものを止まりかけた所に取り違えると、limit がそこになり、ここでも上昇が切れる。
+    合成データでは、レップの前の静止点からいちばん速い所まで 6.7 秒以上あると 8 通り中 4 通りで起きた（上昇 2.5〜3.5 秒の
+    1 回目。4.7 秒以下では 40 レップ中 0。実データの 146 レップでは 7.9 秒が 1 レップ、ほかは 4.7 秒以下）。上昇が 4 秒以上
+    のときは、静止の長さによらず起きた。動画のレップ区間があるときは、solve_lockout が取り違えないようにした（2026-11-16）。
+    残っている弱点（未修正）: IMU だけでレップを数えるとき（時刻合わせが合わなかったセット）は、この取り違えが残る。
+    """
+    n = len(v)
+    stop, limit = min(int(stop), n - 1), min(int(limit), n - 1)
+
+    def run_end(i):
+        while i < stop and v[i + 1] > thr:
+            i += 1
+        return i
+
+    e = run_end(int(p))
+    if limit <= e:
+        return e
+    top = float(np.nanmax(z[b:limit + 1]) - z[b])
+    if not top > 0:
+        return e
+    while (z[e] - z[b]) < RISE_DONE_FRAC * top:
+        j = e + 1
+        while j <= limit and not v[j] > thr:
+            j += 1
+        if j > limit:
+            break
+        e = run_end(j)
+    return e
+
+
+def concentric_phase(v, a, p, b=None, limit=None):
     """
     レップの上昇ピーク p を含むコンセントリック区間 [s, e] と、推進局面の終わり pe を返す。
     しきい値 = ピークの 5%（最低 0.02 m/s）。0 を境にすると、残ったわずかなずれで静止中まで上昇に数えてしまう。
       s  : 底 b（いちばん低い位置）のあとで、速度が初めてしきい値を超えた所。
            b が無いときは、ピークからさかのぼってしきい値を超えて続く区間の始まり（以前の決め方）
-      e  : ピークのあと、しきい値を超えて続く区間の終わり
+      e  : 上がり終わり（rise_end）。ピークのあと、速度がしきい値を下回る直前。底 b とレップの終わり limit
+           （上昇の続きを探す範囲の終わり）が分かっていれば、バーがいちばん高い所の 9 割に届く前に速度が落ちても
+           終わりにせず、その先へ続ける。どちらかが無いときは、ピークのあとでしきい値を下回る直前（以前の決め方）
       pe : ピーク以降で加速度が −g を下回る直前（MPV の定義: 減速が重力より大きい局面を除く）
     2026-11-12 修正: 以前は s もピークからさかのぼって決めていたので、上がる途中で速度がしきい値まで落ちると、
     落ちた所より前が上昇から切れていた（11/10 set03 の 4 回目: 上がる途中でバーの端の IMU の速度が
     0.25 秒ほど −0.05 m/s まで落ち、上昇時間 0.93 秒・MCV 0.360。動画は 1.97 秒・0.306。
     落ちた原因は分かっていない: バーが左右に揺れたためかどうかは確かめられていない）。
-    残っている弱点（未修正）: e は今もピークから先へたどって決める。速度のピークが上昇の前半にあり、その後で
-    止まりかけるレップでは、止まりかけた所を上がり終わりと数えてしまう（きついセットで起こりうる）。
+    2026-11-16 修正: e も、止まりかけた所で切れないようにした（rise_end）。
     """
     n = len(v)
     thr = max(0.02, 0.05 * float(v[p]))
@@ -341,9 +409,14 @@ def concentric_phase(v, a, p, b=None):
         s = p
         while s > 0 and v[s - 1] > thr:
             s -= 1
-    e = p
-    while e < n - 1 and v[e + 1] > thr:
-        e += 1
+    if b is not None and 0 <= b <= p and limit is not None:
+        b = int(b)
+        z = np.cumsum(v[b:])            # 底からの高さ（割合だけを使うので、時間刻みは掛けない）
+        e = b + rise_end(v[b:], z, 0, p - b, thr, n - 1 - b, int(limit) - b)
+    else:
+        e = p
+        while e < n - 1 and v[e + 1] > thr:
+            e += 1
     pe = e
     for i in range(p, e + 1):
         if a[i] < -G:
@@ -469,11 +542,15 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
     速度はレップごとに「ロックアウトで速度0・変位0」でドリフトを解き直したもの
     （挙上の直後はすぐラックへ歩くので、ロックアウト後に静止区間が無いことが多い）。
     ロックアウトは次のレップの下降の始まりより前で探す（回と回の間が短いセット。solve_lockout、2026-11-06）。
+    動画のレップ区間があれば、その終わりの SYNC_PAD_S 秒前より後ろで探す（上がる途中で止まりかけた所を
+    ロックアウトに取り違えないため。2026-11-16）。
     rep_windows（動画のレップ区間を IMU の時刻に直したもの）があればその区間でレップを取り、
     無ければ IMU だけで数える。時刻は M5 の時計（imu_on_device_clock）。
     底（bottoms）は、下降の速度のピークから上昇のピークまでで位置がいちばん低い所（上昇は底から数える。2026-11-12）。
     速度ではなく位置で探すので、上がる途中で速度が 0 を下回っても、そこを底と取り違えない。
-    戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "bottoms", "rep_source", "n_still"（静止区間の数）}
+    上昇の続きを探す範囲の終わり（limits。rise_end に渡す。2026-11-16）は、ロックアウト。動画のレップ区間があれば、
+    その終わりの RISE_POST_S 秒後とロックアウトの早い方（ロックアウトまでだと、立ち上がりきった後の揺れが入る）。
+    戻り値: {"t", "fs", "dt", "a", "v", "g_ref", "peaks", "bottoms", "limits", "rep_source", "n_still"（静止区間の数）}
     """
     imu_df = imu_on_device_clock(imu_df)
     t = imu_df["timestamp_ms"].to_numpy() / 1000.0   # [s]
@@ -484,20 +561,21 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
     az_dyn_lp, v, g_ref, v_raw, v_hp, anchors = imu_vertical_velocity(imu_df, fs, dt_med)
 
     if rep_windows:
-        rep_idx = reps_from_video(v_hp, t, rep_windows, fs)
+        rep_idx, rep_tes, rep_ends = reps_from_video(v_hp, t, rep_windows, fs)
         rep_source = "video"
     else:
         rep_idx = select_reps(v_hp, fs, dt_med, expected_reps=expected_reps)
+        rep_tes = rep_ends = [None] * len(rep_idx)
         rep_source = "imu"
     v = v.copy()
-    peaks, bottoms, prev_T = [], [], None
+    peaks, bottoms, limits, prev_T = [], [], [], None
     for k, (ds, dmin, pk) in enumerate(rep_idx):
         before = [c for c in anchors if c <= ds]
         a0 = before[-1] if before else ds
         if prev_T is not None and prev_T > a0:
             a0 = prev_T
         nxt = rep_idx[k + 1][0] if k + 1 < len(rep_idx) else None   # 次のレップの下降の始まり（最後のレップは無し）
-        T, vc = solve_lockout(v_raw, a0, pk, fs, dt_med, limit=nxt)
+        T, vc = solve_lockout(v_raw, a0, pk, fs, dt_med, limit=nxt, rep_end=rep_tes[k])
         v[a0:T + 1] = vc
         prev_T = T
         p_new = int(dmin + np.argmax(v[dmin:T + 1]))
@@ -506,9 +584,10 @@ def imu_rep_velocity(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None)
             continue
         peaks.append(p_new)
         bottoms.append(int(dmin + np.argmin(np.cumsum(v[dmin:p_new + 1]))))   # 位置がいちばん低い所
+        limits.append(int(T) if rep_ends[k] is None else int(min(T, rep_ends[k])))
     return {"t": t, "fs": fs, "dt": dt_med, "a": az_dyn_lp, "v": v, "g_ref": g_ref,
             "peaks": np.array(peaks, dtype=int), "bottoms": np.array(bottoms, dtype=int),
-            "rep_source": rep_source, "n_still": len(anchors)}
+            "limits": np.array(limits, dtype=int), "rep_source": rep_source, "n_still": len(anchors)}
 
 
 def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=None) -> dict:
@@ -558,8 +637,8 @@ def compute_imu_features(imu_df: pd.DataFrame, expected_reps=None, rep_windows=N
 
     # レップごとの指標（ピーク速度・MCV・MPV・コンセントリック時間）
     reps = []
-    for p, b in zip(peaks, m["bottoms"]):
-        s, e, pe = concentric_phase(v, az_dyn_lp, int(p), int(b))
+    for p, b, lim in zip(peaks, m["bottoms"], m["limits"]):
+        s, e, pe = concentric_phase(v, az_dyn_lp, int(p), int(b), int(lim))
         reps.append({
             "peak_t_s": float(t[p]),
             "start_t_s": float(t[s]),
@@ -731,11 +810,13 @@ def sync_video_imu(kp_df, width, height, fps, imu_df, t_range=None) -> dict:
 def reps_from_video(v_hp, t, windows, fs):
     """
     動画のレップ区間（IMU の時刻に直した (始まり, 底, 終わり) [s]）から IMU のレップを取る。
-    戻り値は select_reps と同じ [(下降の始まり, 下降のピーク, 上昇のピーク), ...]。
+    戻り値: (select_reps と同じ [(下降の始まり, 下降のピーク, 上昇のピーク), ...],
+             レップごとの「動画のレップの終わり」の位置（ロックアウトをこれより大きく前にしない: solve_lockout）,
+             レップごとの「動画のレップの終わりの RISE_POST_S 秒後」の位置 = 上昇の続きを探す範囲の終わり)。
     IMU の記録からはみ出すレップ（送信が途中で止まったなど）は入れない。
     """
     n, pad = len(t), max(1, int(SYNC_PAD_S * fs))
-    out = []
+    out, tes, ends = [], [], []
     for ts, tb, te in windows:
         i_s, i_b, i_e = (int(np.searchsorted(t, x)) for x in (ts, tb, te))
         if i_s <= 0 or i_e >= n - 1:
@@ -747,7 +828,9 @@ def reps_from_video(v_hp, t, windows, fs):
         while ds > lo and v_hp[ds - 1] < -0.03:
             ds -= 1
         out.append((ds, dmin, pk))
-    return out
+        tes.append(i_e)
+        ends.append(min(n - 1, int(np.searchsorted(t, te + RISE_POST_S))))
+    return out, tes, ends
 
 
 # ===========================================================================

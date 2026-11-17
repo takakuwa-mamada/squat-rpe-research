@@ -31,10 +31,14 @@
    IMU の条件は IMU のある試技（本人）だけで評価する
 
  学習データの範囲（RPE 5 未満の軽いセットを学習に入れるか）:
-   all       全 RPE で学習（図・保存モデルはこちら）
-   rpe>=5    RPE 5 以上のセットだけで学習（--train-min-rpe で変更）
+   rpe>=5    RPE 5 以上のセットだけで学習（主結果。図・保存モデルはこちら。--train-min-rpe で変更）
+   all       全 RPE で学習（比較用。report.md の「学習データの範囲の比較」の表）
+   ※ 2026-11-17 に、主結果を all から rpe>=5 に変えた（ユーザー決定「変えて」）。RPE 4 以下は目安で付けていて
+     数字の違い（3 か 4 か）に意味がないので、学習に使わない。4 にまとめる・「4 以下」という情報として使う、も試したが
+     当たり方は良くならなかった（8 日・28 セット、参考値）。結果を見て選び直さない（この範囲で固定する）
    ※ テストに使うセットはどちらも同じなので、MAE をそのまま比べられる
-   ※ RPE 5 未満のセットが 1 つも無いときは all だけ
+   ※ RPE 5 未満のセットが 1 つも無いときは all だけ（それが主結果）
+   ※ rpe>=5 で学習したモデルは 5 未満を予測しない（予測を 5〜10 に収める。5 と出たら「5 以下」の意味）
  評価の範囲:
    all       テストの全セット
    rpe>=6    RPE 6 以上のセットだけ（実際にトレーニングで使う範囲。主結果。--eval-min-rpe で変更）
@@ -50,7 +54,8 @@
    curves.csv         方式 C・D の k ごとの結果（学習の範囲・評価の範囲つき）
    predictions.csv    全予測（どのフォールドで予測したか付き）
    fig_*.png          比較の棒グラフ、学習曲線、散布図、特徴量重要度
-   <条件>__<モデル>.pkl, best.pkl   全データで学習し直したモデル（predict_rpe.py 用）
+   <条件>__<モデル>.pkl, best.pkl   主結果の学習の範囲のセット全部で学習し直したモデル（predict_rpe.py 用。
+                                    train_min_rpe = 学習に使った RPE の下限、pred_range = 予測を収める範囲、を持つ）
 
  使い方:
    python scripts\\train_rpe_model.py
@@ -99,7 +104,6 @@ DEFAULT_INPUT = PROJECT_ROOT / "outputs" / "features_all.csv"
 DEFAULT_OUTDIR = PROJECT_ROOT / "models"
 
 RPE_FLOOR, RPE_MAX = 1.0, 10.0   # RPE の目盛りの下限・上限（予測をこの範囲に収める）
-MAIN_TRAIN = "all"               # 図・保存モデルに使う学習データの範囲
 
 # ---------------------------------------------------------------------------
 # 特徴量セット（明示的に列挙する。記録長・品質指標・ドリフトを含む列は使わない）
@@ -390,8 +394,9 @@ def summarize(pred: pd.DataFrame, eval_sets: dict) -> pd.DataFrame:
     return res.sort_values(["scheme", "train_set", "eval_set", "mae"])
 
 
-def importance_on_folds(df, cond, scheme, min_sessions):
-    """テスト側フォールドでの permutation importance の平均（学習データでの過大評価を避ける）"""
+def importance_on_folds(df, cond, scheme, min_sessions, train_min=None):
+    """テスト側フォールドでの permutation importance の平均（学習データでの過大評価を避ける）。
+    学習は主結果と同じ範囲（train_min 以上の RPE のセットだけ。None なら全部）"""
     d = eligible(df, cond)
     imps = []
     if scheme == "B_loso":
@@ -403,7 +408,7 @@ def importance_on_folds(df, cond, scheme, min_sessions):
             if len(sess) >= min_sessions:
                 folds += [(g[g["session_id"] != s], g[g["session_id"] == s]) for s in sess]
     for tr, te in folds:
-        res, use = fit_predict("hgb", cond["cols"], tr, te)
+        res, use = fit_predict("hgb", cond["cols"], restrict(tr, train_min), te, clip_low(train_min))
         if res is None or len(te) < 2:
             continue
         pi = permutation_importance(res[1], te[use].to_numpy(float), te["rpe"].to_numpy(float),
@@ -619,8 +624,12 @@ def main():
     if (df["rpe"] < args.eval_min_rpe).any() and (df["rpe"] >= args.eval_min_rpe).any():
         eval_sets[f"rpe>={args.eval_min_rpe:g}"] = args.eval_min_rpe
     main_eval = list(eval_sets)[-1]          # RPE 6 以上があればそれ、無ければ全セット
+    # 主結果の学習の範囲: RPE 5 以上だけ（RPE 5 未満のセットが無いデータでは全 RPE）。2026-11-17 に全 RPE から変えた
+    main_train = list(train_sets)[-1]
+    main_tmin = train_sets[main_train]
     print(f"[範囲] 学習: {', '.join(label_train(t) for t in train_sets)}　"
-          f"評価: {', '.join(label_eval(e) for e in eval_sets)}（主結果: {label_eval(main_eval)}）")
+          f"評価: {', '.join(label_eval(e) for e in eval_sets)}"
+          f"（主結果: 学習 {label_train(main_train)}／評価 {label_eval(main_eval)}）")
 
     # データの内訳（imu / video = 学習に使えるセット数、*_excluded = データの欠けなどで外したセット数）
     df["use_imu"] = (df[IMU_KEY].notna() if IMU_KEY in df else False) & (df["excl_imu"] == "")
@@ -645,13 +654,16 @@ def main():
     if not curves.empty:
         curves.to_csv(out_dir / "curves.csv", index=False, encoding="utf-8-sig")
 
-    # 主結果（図・保存モデル・表）: 学習 = 全 RPE、評価 = RPE 6 以上（無ければ全セット）
+    # 主結果（図・保存モデル・表）: 学習 = RPE 5 以上だけ（無ければ全 RPE）、評価 = RPE 6 以上（無ければ全セット）
     def main_view(t: pd.DataFrame) -> pd.DataFrame:
         if t.empty:
             return t
-        return t[(t["train_set"] == MAIN_TRAIN) & (t["eval_set"] == main_eval)]
+        return t[(t["train_set"] == main_train) & (t["eval_set"] == main_eval)]
     res_main, curves_main = main_view(res), main_view(curves)
-    eval_note = f"（評価: {label_eval(main_eval)}）"
+    # 図の題と表の見出しに、学習と評価の範囲を書く（学習の範囲が違う図・表を取り違えないため。2026-11-17。
+    # それまでは評価の範囲だけだった）。幅の狭い図（棒グラフ・散布図）は題が長くなるので改行する
+    eval_note = f"（学習: {label_train(main_train)}／評価: {label_eval(main_eval)}）"
+    fig_note = "\n" + eval_note
 
     # 図
     figs = {}
@@ -659,7 +671,7 @@ def main():
               "B_loso": "B. 汎用（Leave-One-Subject-Out）"}
     for sch, t in titles.items():
         if not res_main.empty and (f := fig_compare(res_main, sch, out_dir / f"fig_compare_{sch}.png",
-                                                    t + eval_note)):
+                                                    t + fig_note)):
             figs[sch] = f
     if not curves_main.empty:
         if f := fig_curve(curves_main, "D_personal_curve", out_dir / "fig_curve_personal.png",
@@ -675,11 +687,11 @@ def main():
     if not cand.empty:
         best_row = cand.sort_values("mae").iloc[0]
         bp = pred[(pred["scheme"] == primary) & (pred["condition"] == best_row["condition"])
-                  & (pred["model"] == best_row["model"]) & (pred["train_set"] == MAIN_TRAIN)]
+                  & (pred["model"] == best_row["model"]) & (pred["train_set"] == main_train)]
         if eval_sets[main_eval] is not None:
             bp = bp[bp["rpe"] >= eval_sets[main_eval]]
         figs["scatter"] = fig_scatter(bp, out_dir / "fig_scatter_best.png",
-                                      f"{titles[primary]}{eval_note}\n{best_row['condition']} ({best_row['model']})")
+                                      f"{titles[primary]}{fig_note}\n{best_row['condition']} ({best_row['model']})")
     # 特徴量重要度: 汎用評価があればそれで、無ければ（IMU は本人だけなど）本人専用の評価で
     for cname in ["video_all", "imu+video"]:
         if cname not in conds or res.empty:
@@ -688,24 +700,27 @@ def main():
         sch = "B_loso" if "B_loso" in done else ("A_within" if "A_within" in done else None)
         if sch is None:
             continue
-        imp = importance_on_folds(df, conds[cname], sch, args.min_sessions)
+        imp = importance_on_folds(df, conds[cname], sch, args.min_sessions, main_tmin)
         if imp is not None:
             figs[f"imp_{cname}"] = fig_importance(imp, out_dir / f"fig_importance_{cname.replace('+', '_')}.png",
                                                   f"特徴量重要度: {cname}（{sch}）")
             imp.to_csv(out_dir / f"importance_{cname.replace('+', '_')}.csv", encoding="utf-8-sig")
 
-    # 全データで学習し直したモデル（predict_rpe.py 用）
+    # 主結果の学習の範囲のセット全部で学習し直したモデル（predict_rpe.py 用）。
+    # train_min_rpe = 学習に使った RPE の下限（None = 全 RPE）、pred_range = 予測を収める範囲（評価のときと同じ）
     saved = []
     for cname, cond in conds.items():
         if cond.get("baseline"):          # 比べる基準は予測に使わないので保存しない
             continue
-        d = eligible(df, cond)
+        d = restrict(eligible(df, cond), main_tmin)
         for mname in cond["models"]:
-            res_fit, use = fit_predict(mname, cond["cols"], d, d.head(1))
+            res_fit, use = fit_predict(mname, cond["cols"], d, d.head(1), clip_low(main_tmin))
             if res_fit is None:
                 continue
             bundle = {"model": res_fit[1], "feature_cols": use, "condition": cname, "model_name": mname,
-                      "n_train": int(len(d)), "trained_at": datetime.now().isoformat(timespec="seconds")}
+                      "n_train": int(len(d)), "train_min_rpe": main_tmin,
+                      "pred_range": [clip_low(main_tmin), RPE_MAX],
+                      "trained_at": datetime.now().isoformat(timespec="seconds")}
             fname = f"{cname.replace('+', '_')}__{mname}.pkl"
             joblib.dump(bundle, out_dir / fname)
             saved.append(fname)
@@ -715,7 +730,7 @@ def main():
     # レポート
     lines = [f"# RPE 推定 評価レポート（{datetime.now():%Y-%m-%d %H:%M}）", "",
              f"入力: `{Path(args.input).name}`　試技 {len(df)}　被験者 {df['subject_id'].nunique()} 人", "",
-             f"主結果は「学習: {label_train(MAIN_TRAIN)}／評価: {label_eval(main_eval)}」。"
+             f"主結果は「学習: {label_train(main_train)}／評価: {label_eval(main_eval)}」。"
              f"学習データの範囲の比較は後半の表。", "",
              "## データの内訳", "",
              "imu / video は学習に使えるセット数、*_excluded はデータの欠けなどで外したセット数。", "",
@@ -780,14 +795,20 @@ def main():
               f"- RPE {args.eval_min_rpe:g} 未満は申告がぶれやすい（限界から遠いほど RIR の見積もりがずれる）ので、"
               "主結果の評価から外している。",
               f"- 「RPE {args.train_min_rpe:g} 以上だけで学習」したモデルは {args.train_min_rpe:g} 未満を予測しない"
-              f"（予測を {args.train_min_rpe:g}〜10 に収める）。", ""]
+              f"（予測を {args.train_min_rpe:g}〜10 に収める。{args.train_min_rpe:g} と出たら"
+              f"「{args.train_min_rpe:g} 以下」の意味）。"]
+    if main_tmin is not None:
+        lines += [f"- 主結果の学習には RPE {main_tmin:g} 未満の軽いセットを使わない（2026-11-17 から。それまでは全 RPE で学習）。"
+                  "軽いセットの RPE は目安で付けていて、数字の違いに意味がないため。全 RPE で学習した結果は"
+                  "「学習データの範囲の比較」の表にある。結果を見て範囲を選び直さない。"]
+    lines += [""]
     if log:
         lines += ["## スキップした評価", ""] + [f"- {m}" for m in log] + [""]
     (out_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
     print(f"\n[OK] {out_dir}")
     if not res_main.empty:
-        print(f"主結果（学習: {label_train(MAIN_TRAIN)}／評価: {label_eval(main_eval)}）")
+        print(f"主結果（学習: {label_train(main_train)}／評価: {label_eval(main_eval)}）")
         print(res_main[["scheme", "condition", "model", "n", "mae", "hit10"]].to_string(index=False))
     if len(train_sets) > 1:
         print("  学習データの範囲の比較は report.md の後半の表")

@@ -72,6 +72,16 @@ def load_model(model_path: Path) -> dict:
     return bundle
 
 
+def clip_to_trained_range(bundle: dict, preds):
+    """
+    予測を、評価のとき（train_rpe_model.py）と同じ範囲に収める。範囲はモデルと一緒に保存されている（pred_range）。
+    RPE 5 以上のセットだけで学習したモデルは 5〜10（5 と出たら「5 以下」の意味）。
+    範囲を持たない古いモデル（2026-11-17 より前に保存したもの）は、今までどおりそのまま返す
+    """
+    rng = bundle.get("pred_range")
+    return np.clip(preds, rng[0], rng[1]) if rng else preds
+
+
 def predict_dataframe(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
     feature_cols = bundle["feature_cols"]
     missing = [c for c in feature_cols if c not in df.columns]
@@ -82,7 +92,7 @@ def predict_dataframe(bundle: dict, df: pd.DataFrame) -> pd.DataFrame:
     if len(valid) == 0:
         sys.exit("[ERROR] all rows have NaN in required features")
 
-    preds = bundle["model"].predict(valid[feature_cols].to_numpy(dtype=float))
+    preds = clip_to_trained_range(bundle, bundle["model"].predict(valid[feature_cols].to_numpy(dtype=float)))
     result = valid.copy()
     result["predicted_rpe"] = preds
     if "rpe" in df.columns:
@@ -101,7 +111,7 @@ def predict_single(bundle: dict, feat_json: dict) -> float:
     for c in feature_cols:
         v = feat_json.get(c)
         row.append(float("nan") if v is None else float(v))   # 欠損はモデル側で補完する
-    pred = bundle["model"].predict(np.array([row]))[0]
+    pred = clip_to_trained_range(bundle, bundle["model"].predict(np.array([row])))[0]
     return float(pred)
 
 
@@ -129,7 +139,12 @@ def main():
     bundle = load_model(model_path)
     print(f"[MODEL] name={bundle.get('model_name')}, "
           f"trained_at={bundle.get('trained_at')}, "
-          f"n_samples_trained={bundle.get('n_samples')}")
+          f"n_samples_trained={bundle.get('n_train', bundle.get('n_samples'))}")
+    if bundle.get("pred_range"):
+        lo, hi = bundle["pred_range"]
+        tmin = bundle.get("train_min_rpe")
+        print(f"[MODEL] 予測の範囲: {lo:g}〜{hi:g}"
+              + (f"（RPE {tmin:g} 以上のセットだけで学習。{lo:g} と出たら「{lo:g} 以下」の意味）" if tmin is not None else ""))
     print(f"[MODEL] features ({len(bundle['feature_cols'])}): "
           f"{bundle['feature_cols'][:5]}{'...' if len(bundle['feature_cols'])>5 else ''}")
 
